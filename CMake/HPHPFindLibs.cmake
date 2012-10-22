@@ -54,6 +54,10 @@ MYSQL_SOCKET_SEARCH()
 if (MYSQL_UNIX_SOCK_ADDR)
   add_definitions(-DPHP_MYSQL_UNIX_SOCK_ADDR="${MYSQL_UNIX_SOCK_ADDR}")
 endif()
+# mysql checks
+find_package(PGSQL REQUIRED)
+include_directories(${PGSQL_INCLUDE_DIR})
+link_directories(${PGSQL_LIB_DIR})
 
 # libmemcached checks
 find_package(Libmemcached REQUIRED)
