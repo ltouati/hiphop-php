@@ -145,11 +145,11 @@ class TranslatorX64 : public Translator
   UnwindRegMap               m_unwindRegMap;
   UnwindInfoHandle           m_unwindRegistrar;
 
+public:
   // Currently translating trace or instruction---only valid during
   // translate phase.
   const Tracelet*              m_curTrace;
   const NormalizedInstruction* m_curNI;
-public:
   litstr m_curFile;
   int m_curLine;
   litstr m_curFunc;
@@ -322,7 +322,6 @@ private:
     // the return address pushed by the call.
     uintptr_t returnAddress;
     TypedValue tvScratch;
-    TypedValue tvLiteral;
     TypedValue tvRef;
     TypedValue tvRef2;
     TypedValue tvResult;
@@ -339,6 +338,8 @@ private:
  private:
 
   MVecTransState* m_vecState;
+  void invalidateOutStack(const NormalizedInstruction& ni);
+  void invalidateOutLocal(const NormalizedInstruction& ni);
   int mResultStackOffset(const NormalizedInstruction& ni) const;
   bool generateMVal(const Tracelet& t, const NormalizedInstruction& ni,
                     const MInstrInfo& mii) const;
@@ -356,7 +357,6 @@ private:
                        const DynLocation& val) const;
   bool forceMValIncDec(const Tracelet& t, const NormalizedInstruction& ni,
                        const MInstrInfo& mii) const;
-  size_t emitPrepareLiteral(const Location& l, Asm& a, PhysReg r);
   void emitBaseLCR(const Tracelet& t, const NormalizedInstruction& ni,
                    const MInstrInfo& mii, unsigned iInd, LazyScratchReg& rBase);
   void emitBaseH(unsigned iInd, LazyScratchReg& rBase);
@@ -365,23 +365,22 @@ private:
   void emitBaseG(const Tracelet& t, const NormalizedInstruction& ni,
                  const MInstrInfo& mii, unsigned iInd, LazyScratchReg& rBase);
   void emitBaseS(const Tracelet& t, const NormalizedInstruction& ni,
-                 unsigned iInd, bool ctxFixed, LazyScratchReg& rBase);
+                 unsigned iInd, LazyScratchReg& rBase);
   void emitBaseOp(const Tracelet& t, const NormalizedInstruction& ni,
-                  const MInstrInfo& mii, unsigned iInd, bool ctxFixed,
+                  const MInstrInfo& mii, unsigned iInd,
                   LazyScratchReg& rBase);
   void emitHphpArrayGetIntKey(const NormalizedInstruction& i,
                               PhysReg rBase,
                               const DynLocation& keyLoc,
                               Location outLoc,
                               void* fallbackFunc);
-  template<DataType keyType>
   void emitElem(const Tracelet& t, const NormalizedInstruction& ni,
                 const MInstrInfo& mii, unsigned mInd, unsigned iInd,
                 LazyScratchReg& rBase);
-  void emitProp(const MInstrInfo& mii, bool ctxFixed, unsigned mInd,
+  void emitProp(const MInstrInfo& mii, unsigned mInd,
                 unsigned iInd, LazyScratchReg& rBase);
   void emitPropGeneric(const Tracelet& t, const NormalizedInstruction& ni,
-                       const MInstrInfo& mii, bool ctxFixed, unsigned mInd,
+                       const MInstrInfo& mii, unsigned mInd,
                        unsigned iInd, LazyScratchReg& rBase);
   void emitPropSpecialized(MInstrAttr, const Class*,
                            int propOffset, unsigned mInd, unsigned iInd,
@@ -389,7 +388,7 @@ private:
   void emitNewElem(const Tracelet& t, const NormalizedInstruction& ni,
                    unsigned mInd, LazyScratchReg& rBase);
   void emitIntermediateOp(const Tracelet& t, const NormalizedInstruction& ni,
-                          const MInstrInfo& mii, bool ctxFixed, unsigned mInd,
+                          const MInstrInfo& mii, unsigned mInd,
                           unsigned& iInd, LazyScratchReg& rBase);
   bool needFirstRatchet(const Tracelet& t, const NormalizedInstruction& ni,
                         const MInstrInfo& mii) const;
@@ -408,7 +407,7 @@ private:
                           PhysReg rBase);
   template <bool useEmpty>
   void emitIssetEmptyProp(const Tracelet& t, const NormalizedInstruction& ni,
-                          const MInstrInfo& mii, bool ctxFixed, unsigned mInd,
+                          const MInstrInfo& mii, unsigned mInd,
                           unsigned iInd, PhysReg rBase);
   void emitVGetNewElem(const Tracelet& t, const NormalizedInstruction& ni,
                        const MInstrInfo& mii, unsigned mInd, unsigned iInd,
@@ -430,7 +429,7 @@ private:
                           PhysReg rBase);
   bool needMInstrCtx(const Tracelet& t, const NormalizedInstruction& ni) const;
   void emitMPre(const Tracelet& t, const NormalizedInstruction& ni,
-                const MInstrInfo& mii, bool& ctxFixed, unsigned& mInd,
+                const MInstrInfo& mii, unsigned& mInd,
                 unsigned& iInd, LazyScratchReg& rBase);
   void emitMPost(const Tracelet& t, const NormalizedInstruction& ni,
                  const MInstrInfo& mii);
@@ -439,11 +438,11 @@ private:
                          const MInstrInfo& mii, unsigned mInd, unsigned iInd, \
                          PhysReg rBase); \
   void emit##instr##Prop(const Tracelet& t, const NormalizedInstruction& ni, \
-                         const MInstrInfo& mii, bool ctxFixed, unsigned mInd, \
+                         const MInstrInfo& mii, unsigned mInd, \
                          unsigned iInd, LazyScratchReg& rBase); \
   void emitFinal##instr##MOp(const Tracelet& t, \
                              const NormalizedInstruction& ni, \
-                             const MInstrInfo& mii, bool ctxFixed, \
+                             const MInstrInfo& mii, \
                              unsigned mInd, unsigned iInd, \
                              LazyScratchReg& rBase);
 MINSTRS
@@ -518,6 +517,7 @@ MINSTRS
   CASE(FPassS) \
   CASE(FPassG) \
   CASE(This) \
+  CASE(BareThis) \
   CASE(CheckThis) \
   CASE(InitThisLoc) \
   CASE(FCall) \
@@ -588,6 +588,10 @@ PSEUDOINSTRS
   void fuseBranchAfterStaticBool(const Tracelet& t,
                                  const NormalizedInstruction& i,
                                  bool resultIsTrue);
+  void emitReturnVal(Asm& a, const NormalizedInstruction& i,
+                     PhysReg dstBase, int dstOffset,
+                     PhysReg thisBase, int thisOffset,
+                     PhysReg scratch);
   void translateSetMArray(const Tracelet &t, const NormalizedInstruction& i);
   void emitPropGet(const NormalizedInstruction& i,
                    const DynLocation& base,
@@ -738,6 +742,7 @@ private:
   void dumpStack(const char* msg, int offset) const;
 
   static const size_t kJmpTargetAlign = 16;
+  static const size_t kNonFallthroughAlign = 64;
   static const int kJmpLen = 5;
   static const int kJmpccLen = 6;
   static const int kJcc8Len = 3;
@@ -745,6 +750,7 @@ private:
   // Cache alignment is required for mutable instructions to make sure
   // mutations don't "tear" on remote cpus.
   static const size_t kX64CacheLineSize = 64;
+  static const size_t kX64CacheLineMask = kX64CacheLineSize - 1;
   void moveToAlign(Asm &aa, const size_t alignment = kJmpTargetAlign,
                    const bool unreachable = true);
   void prepareForSmash(Asm &a, int nBytes);
@@ -980,7 +986,6 @@ SrcKey nextSrcKey(const Tracelet& t, const NormalizedInstruction& i);
 bool isNormalPropertyAccess(const NormalizedInstruction& i,
                        int propInput,
                        int objInput);
-bool isContextFixed();
 int getNormalPropertyOffset(const NormalizedInstruction& i,
                             const MInstrInfo&,
                             int propInput, int objInput);

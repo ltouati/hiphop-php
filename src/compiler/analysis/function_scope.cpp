@@ -56,9 +56,9 @@ FunctionScope::FunctionScope(AnalysisResultConstPtr ar, bool method,
       m_modifiers(modifiers), m_hasVoid(false),
       m_method(method), m_refReturn(reference), m_virtual(false),
       m_hasOverride(false), m_perfectVirtual(false), m_overriding(false),
-      m_volatile(false), m_pseudoMain(inPseudoMain),
+      m_volatile(false), m_persistent(false), m_pseudoMain(inPseudoMain),
       m_magicMethod(false), m_system(false), m_inlineable(false), m_sep(false),
-      m_containsThis(false), m_containsBareThis(false), m_nrvoFix(true),
+      m_containsThis(false), m_containsBareThis(0), m_nrvoFix(true),
       m_inlineAsExpr(false), m_inlineSameContext(false),
       m_contextSensitive(false),
       m_directInvoke(false), m_needsRefTemp(false),
@@ -92,6 +92,7 @@ FunctionScope::FunctionScope(FunctionScopePtr orig,
       m_virtual(orig->m_virtual), m_hasOverride(orig->m_hasOverride),
       m_perfectVirtual(orig->m_perfectVirtual),
       m_overriding(orig->m_overriding), m_volatile(orig->m_volatile),
+      m_persistent(orig->m_persistent),
       m_pseudoMain(orig->m_pseudoMain), m_magicMethod(orig->m_magicMethod),
       m_system(orig->m_system), m_inlineable(orig->m_inlineable),
       m_sep(orig->m_sep), m_containsThis(orig->m_containsThis),
@@ -196,9 +197,9 @@ FunctionScope::FunctionScope(bool method, const std::string &name,
       m_modifiers(ModifierExpressionPtr()), m_hasVoid(false),
       m_method(method), m_refReturn(reference), m_virtual(false),
       m_hasOverride(false), m_perfectVirtual(false), m_overriding(false),
-      m_volatile(false), m_pseudoMain(false),
+      m_volatile(false), m_persistent(false), m_pseudoMain(false),
       m_magicMethod(false), m_system(true), m_inlineable(false), m_sep(false),
-      m_containsThis(false), m_containsBareThis(false), m_nrvoFix(true),
+      m_containsThis(false), m_containsBareThis(0), m_nrvoFix(true),
       m_inlineAsExpr(false), m_inlineSameContext(false),
       m_contextSensitive(false),
       m_directInvoke(false), m_needsRefTemp(false), m_needsObjTemp(false),
@@ -405,6 +406,15 @@ bool FunctionScope::isConstructor(ClassScopePtr cls) const {
 
 bool FunctionScope::isMagic() const {
   return m_name.size() >= 2 && m_name[0] == '_' && m_name[1] == '_';
+}
+
+bool FunctionScope::needsLocalThis() const {
+  return containsBareThis() &&
+    (inPseudoMain() ||
+     containsRefThis() ||
+     isStatic() ||
+     getVariables()->getAttribute(
+       VariableTable::ContainsDynamicVariable));
 }
 
 static std::string s_empty;

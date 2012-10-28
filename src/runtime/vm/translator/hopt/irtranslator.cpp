@@ -781,8 +781,7 @@ isSupportedCGetMProp(const NormalizedInstruction& i) {
           mcodeMaybePropName(i.immVecM[0]),
           i.inputs[0]->rtt.pretty().c_str(),
           i.inputs[1]->rtt.pretty().c_str());
-  return isNormalPropertyAccess(i, 1, 0) && isContextFixed() &&
-         i.immVec.locationCode() != LL;
+  return isNormalPropertyAccess(i, 1, 0) && i.immVec.locationCode() != LL;
 }
 
 void
@@ -936,7 +935,7 @@ static bool isSupportedSetMProp(const NormalizedInstruction& i) {
   SKTRACE(2, i.source, "setM prop candidate: prop supported: %d, rtt %s\n",
           mcodeMaybePropName(i.immVecM[0]),
           i.inputs[2]->rtt.pretty().c_str());
-  return isNormalPropertyAccess(i, 2, 1) && isContextFixed();
+  return isNormalPropertyAccess(i, 2, 1);
 }
 
 void
@@ -1090,7 +1089,6 @@ TranslatorX64::irTranslateFPushClsMethodD(const Tracelet& t,
     mightNotBeStatic = true;
   }
 
-  HHIR_UNIMPLEMENTED_WHEN(!isContextFixed(), FPushClsMethodD);
   HHIR_EMIT(FPushClsMethodD,
              (i.imm[0].u_IVA),
              (i.imm[1].u_SA),
@@ -1108,8 +1106,7 @@ void
 TranslatorX64::irTranslateFPushObjMethodD(const Tracelet &t,
                                         const NormalizedInstruction& i) {
   ASSERT(i.inputs.size() == 1);
-  HHIR_UNIMPLEMENTED_WHEN((i.inputs[0]->valueType() != KindOfObject ||
-                           !isContextFixed()),
+  HHIR_UNIMPLEMENTED_WHEN((i.inputs[0]->valueType() != KindOfObject),
                           FPushObjMethod_nonObj);
   ASSERT(i.inputs[0]->valueType() == KindOfObject);
   int id = i.imm[1].u_IVA;
@@ -1142,6 +1139,15 @@ TranslatorX64::irTranslateThis(const Tracelet &t,
   ASSERT(curFunc()->isPseudoMain() || curFunc()->cls());
 
   HHIR_EMIT(This);
+}
+
+void
+TranslatorX64::irTranslateBareThis(const Tracelet &t,
+                                  const NormalizedInstruction &i) {
+  ASSERT(i.outStack && !i.outLocal);
+  ASSERT(curFunc()->isPseudoMain() || curFunc()->cls());
+
+  HHIR_UNIMPLEMENTED(BareThis);
 }
 
 void
@@ -1446,7 +1452,7 @@ TranslatorX64::irTranslateInstr(const Tracelet& t,
   SKTRACE(1, i.source, "translate %#lx\n", long(a.code.frontier));
   const Opcode op = i.op();
 
-  m_hhbcTrans->setBcOff(i.source.offset(), i.breaksBB);
+  m_hhbcTrans->setBcOff(i.source.offset(), i.breaksTracelet);
 
   if (!i.grouped) {
     emitVariantGuards(t, i);
@@ -1528,6 +1534,7 @@ TranslatorX64::irTranslateTracelet(const Tracelet& t,
   const SrcKey &sk = t.m_sk;
   SrcRec&                 srcRec = *getSrcRec(sk);
   vector<TransBCMapping>  bcMapping;
+  ASSERT(srcRec.inProgressTailJumps().size() == 0);
   try {
     // Don't translate if we have already reached the maximum # of
     // translations for this tracelet
@@ -1556,8 +1563,8 @@ TranslatorX64::irTranslateTracelet(const Tracelet& t,
       irTranslateInstr(t, *ni);
       ASSERT(ni->source.offset() >= curFunc()->base());
       // We sometimes leave the tail of a truncated tracelet in place to aid
-      // analysis, but breaksBB is authoritative.
-      if (ni->breaksBB) break;
+      // analysis, but breaksTracelet is authoritative.
+      if (ni->breaksTracelet) break;
     }
 
     hhirTraceEnd(t.m_nextSk.offset());
@@ -1591,6 +1598,8 @@ TranslatorX64::irTranslateTracelet(const Tracelet& t,
     a.code.frontier = start;
     astubs.code.frontier = stubStart;
     m_pendingFixups.clear();
+    // Reset additions to list of addresses which need to be patched
+    srcRec.clearInProgressTailJumps();
   }
 
   return hhirSucceeded;

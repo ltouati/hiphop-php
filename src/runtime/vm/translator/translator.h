@@ -209,10 +209,13 @@ struct DynLocation {
   }
 
   bool isStack() const {
-    return location.space == Location::Stack;
+    return location.isStack();
   }
   bool isLocal() const {
-    return location.space == Location::Local;
+    return location.isLocal();
+  }
+  bool isLiteral() const {
+    return location.isLiteral();
   }
 
   // Uses the runtime state. True if this dynLocation can be overwritten by
@@ -276,7 +279,8 @@ class NormalizedInstruction {
   // stack at tracelet entry.
   int stackOff;
   unsigned hasConstImm:1;
-  unsigned breaksBB:1;
+  unsigned startsBB:1;
+  unsigned breaksTracelet:1;
   unsigned changesPC:1;
   unsigned fuseBranch:1;
   unsigned preppedByRef:1;    // For FPass*; indicates parameter reffiness

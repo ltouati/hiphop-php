@@ -145,6 +145,8 @@ public:
   bool hasTry() const { return m_hasTry; }
   unsigned getNewID() { return m_nextID++; }
 
+  bool needsLocalThis() const;
+
   /**
    * Either __construct or a class-name constructor.
    */
@@ -222,7 +224,14 @@ public:
   bool containsThis() const { return m_containsThis;}
   void setContainsThis(bool f=true) { m_containsThis = f;}
   bool containsBareThis() const { return m_containsBareThis; }
-  void setContainsBareThis(bool f=true) { m_containsBareThis = f; }
+  bool containsRefThis() const { return m_containsBareThis & 2; }
+  void setContainsBareThis(bool f, bool ref = false) {
+    if (f) {
+      m_containsBareThis |= ref ? 2 : 1;
+    } else {
+      m_containsBareThis = 0;
+    }
+  }
   /**
    * How many parameters a caller should provide.
    */
@@ -281,8 +290,10 @@ public:
   bool isLocalRedeclaring() const { return m_localRedeclaring; }
 
   /* For function_exists */
-  void setVolatile() { m_volatile = true;}
-  bool isVolatile() const { return m_volatile;}
+  void setVolatile() { m_volatile = true; }
+  bool isVolatile() const { return m_volatile; }
+  bool isPersistent() const { return m_persistent; }
+  void setPersistent(bool p) { m_persistent = p; }
 
   bool isInlined() const { return m_inlineable; }
   void disableInline() { m_inlineable = false; }
@@ -528,13 +539,15 @@ private:
   unsigned m_dynamicInvoke : 1;
   unsigned m_overriding : 1; // overriding a virtual function
   unsigned m_volatile : 1; // for function_exists
+  unsigned m_persistent : 1;
   unsigned m_pseudoMain : 1;
   unsigned m_magicMethod : 1;
   unsigned m_system : 1;
   unsigned m_inlineable : 1;
   unsigned m_sep : 1;
   unsigned m_containsThis : 1; // contains a usage of $this?
-  unsigned m_containsBareThis : 1; // $this outside object-context
+  unsigned m_containsBareThis : 2; // $this outside object-context,
+                                   // 2 if in reference context
   unsigned m_nrvoFix : 1;
   unsigned m_inlineAsExpr : 1;
   unsigned m_inlineSameContext : 1;

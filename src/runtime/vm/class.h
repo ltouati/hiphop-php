@@ -206,6 +206,7 @@ class PreClass : public AtomicCountable {
   const TraitPrecRuleVec& traitPrecRules() const { return m_traitPrecRules; }
   const TraitAliasRuleVec& traitAliasRules() const { return m_traitAliasRules; }
   const UserAttributeMap& userAttributes() const { return m_userAttributes; }
+  bool isPersistent() const { return m_attrs & AttrPersistent; }
 
   /*
    *  Funcs, Consts, and Props all behave similarly. Define raw accessors
@@ -537,7 +538,16 @@ public:
 
   Avail avail(Class *&parent, bool tryAutoload = false) const;
   Class* classof(const PreClass* preClass) const;
-  bool classof(const Class* cls) const;
+  bool classof(const Class* cls) const {
+    if (UNLIKELY((attrs() & (AttrInterface | AttrTrait)) ||
+                 (cls->attrs() & (AttrInterface | AttrTrait)))) {
+      return (classof(cls->m_preClass.get()) == cls);
+    }
+    if (m_classVecLen >= cls->m_classVecLen) {
+      return (m_classVec[cls->m_classVecLen-1] == cls);
+    }
+    return false;
+  }
   const StringData* name() const {
     return m_preClass->name();
   }
@@ -573,6 +583,7 @@ public:
     ASSERT(Attr(m_attrCopy) == m_preClass->attrs());
     return Attr(m_attrCopy);
   }
+  bool verifyPersistent() const;
   const Func* getCtor() const { return m_ctor; }
   const Func* getDtor() const { return m_dtor; }
   const Func* getToString() const { return m_toString; }
@@ -607,6 +618,8 @@ public:
   Func* lookupMethod(const StringData* methName) const {
     return m_methods.lookupDefault(methName, 0);
   }
+
+  bool isPersistent() const { return m_attrCopy & AttrPersistent; }
 
   /*
    * We have a call site for an object method, which previously

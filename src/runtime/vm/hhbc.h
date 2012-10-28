@@ -179,6 +179,7 @@ enum MInstrAttr {
   MIA_final_get    = 0x20,
   MIA_base         = MIA_warn | MIA_define,
   MIA_intermediate = MIA_warn | MIA_define | MIA_reffy | MIA_unset,
+  MIA_intermediate_prop = MIA_warn | MIA_define | MIA_unset,
   MIA_final        = MIA_new | MIA_final_get,
 
   // Some warnings may conditionally be built for Zend compatibility,
@@ -518,6 +519,7 @@ enum SetOpOp {
   O(DefCls,          ONE(IVA),         NOV,             NOV,        NF) \
   O(DefCns,          ONE(SA),          ONE(CV),         ONE(CV),    NF) \
   O(This,            NA,               NOV,             ONE(CV),    NF) \
+  O(BareThis,        ONE(OA),          NOV,             ONE(CV),    NF) \
   O(CheckThis,       NA,               NOV,             NOV,        NF) \
   O(InitThisLoc,     ONE(IVA),         NOV,             NOV,        NF) \
   O(StaticLoc,       TWO(IVA,SA),      NOV,             ONE(CV),    NF) \
