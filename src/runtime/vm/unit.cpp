@@ -1129,6 +1129,14 @@ void Unit::enableIntercepts() {
 
 Func *Unit::lookupFunc(const NamedEntity *ne, const StringData* name) {
   Func *func = ne->getCachedFunc();
+  if(func==NULL) {
+    const char *function_name = name->data();
+    const char *last_slash_position = strrchr(function_name,'\\');
+    if(last_slash_position!=NULL) {
+        last_slash_position++;
+        return Unit::lookupFunc(new StringData(last_slash_position));
+    }
+  }
   return func;
 }
 
