@@ -27,7 +27,7 @@
 #include <runtime/base/util/request_local.h>
 #include <runtime/base/macros.h>
 #include <runtime/eval/eval.h>
-
+#include <util/logger.h>
 #include <system/lib/systemlib.h>
 
 #define PDO_HANDLE_DBH_ERR(dbh)                         \
@@ -484,7 +484,7 @@ void pdo_raise_impl_error(sp_PDOConnection dbh, sp_PDOStatement stmt,
   if (supp) {
     err += ": "; err += supp;
   }
-
+  Logger::Error("Error");
   if (dbh->error_mode != PDO_ERRMODE_EXCEPTION) {
     raise_warning("%s", err.c_str());
   } else {
@@ -529,6 +529,7 @@ static void pdo_handle_error(sp_PDOConnection dbh, sp_PDOStatement stmt) {
     err += " ";  err += supp.data();
   }
 
+  Logger::Error("PDO %s",err.c_str());
   if (dbh->error_mode != PDO_ERRMODE_EXCEPTION) {
     raise_warning("%s", err.c_str());
   } else {
@@ -2548,7 +2549,7 @@ rewrite:
       String name(plc->pos, plc->len, AttachLiteral);
 
       /* check if bound parameter is already available */
-      if (!strcmp(name, "?") || !stmt->bound_param_map.exists(name)) {
+      if (strcmp(name, "?")>=0 || !stmt->bound_param_map.exists(name)) {
         idxbuf.printf(tmpl, bind_no++);
       } else {
         idxbuf.clear();

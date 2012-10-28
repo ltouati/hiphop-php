@@ -18,6 +18,7 @@
 #include <runtime/ext/pdo_driver.h>
 #include <runtime/ext/pdo_sqlite.h>
 #include <runtime/ext/pdo_mysql.h>
+#include <runtime/ext/pdo_pgsql.h>
 #include <runtime/ext/ext_variable.h>
 
 namespace HPHP {
@@ -37,6 +38,7 @@ PDODriverMap PDODriver::s_drivers;
 // We will have to list them all here for proper static initialization.
 static PDOSqlite s_sqlite_driver;
 static PDOMySql s_mysql_driver;
+static PDOPgSql s_pgsql_driver;
 
 PDODriver::PDODriver(const char *name) : m_name(name) {
   s_drivers[name] = this;
