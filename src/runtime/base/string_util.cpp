@@ -26,13 +26,24 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // manipulations
 
-String StringUtil::ToLower(CStrRef input) {
-  if (input.empty()) return input;
-  int len = input.size();
-  char *ret = string_to_lower(input.data(), len);
-  return String(ret, len, AttachString);
-}
+  String StringUtil::ToLower(CStrRef input, ToLowerType type /*= ToLowerAll */) {
+    if (input.empty()) return input;
 
+    int len = input.size();
+    char *ret = NULL;
+    switch (type) {
+    case ToLowerAll:
+      ret = string_to_lower(input.data(), len);
+      break;
+    case ToLowerFirst:
+      ret = string_to_lower_first(input.data(), len);
+      break;
+    default:
+      ASSERT(false);
+      break;
+    }
+    return String(ret, len, AttachString);
+  }
 String StringUtil::ToUpper(CStrRef input, ToUpperType type /*= ToUpperAll */) {
   if (input.empty()) return input;
 

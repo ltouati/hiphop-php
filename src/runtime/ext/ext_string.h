@@ -59,6 +59,9 @@ inline String f_str_shuffle(CStrRef str) {
 inline String f_strrev(CStrRef str) {
   return StringUtil::Reverse(str);
 }
+ inline String f_lcfirst(CStrRef str) {
+   return StringUtil::ToLower(str, StringUtil::ToLowerFirst);
+ }
 inline String f_strtolower(CStrRef str) {
   return StringUtil::ToLower(str);
 }
