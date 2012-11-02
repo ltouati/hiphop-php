@@ -2951,6 +2951,10 @@ StaticStringProxy s_sys_ssp5639d021;
 #ifndef s_sys_ss5639d021
 #define s_sys_ss5639d021 (*(StaticString *)(&s_sys_ssp5639d021))
 #endif
+StaticStringProxy s_sys_ssp563d2a7f;
+#ifndef s_sys_ss563d2a7f
+#define s_sys_ss563d2a7f (*(StaticString *)(&s_sys_ssp563d2a7f))
+#endif
 StaticStringProxy s_sys_ssp56672b3d;
 #ifndef s_sys_ss56672b3d
 #define s_sys_ss56672b3d (*(StaticString *)(&s_sys_ssp56672b3d))
@@ -4870,6 +4874,7 @@ static const char *ss_data0[] = {
   (const char *)&s_sys_ssp55da3cff, (const char *)"invokeArgs",
   (const char *)&s_sys_ssp55e2caa5, (const char *)"accept",
   (const char *)&s_sys_ssp5639d021, (const char *)"MYSQL_ATTR_DIRECT_QUERY",
+  (const char *)&s_sys_ssp563d2a7f, (const char *)"querystring",
   (const char *)&s_sys_ssp56672b3d, (const char *)"__sleep",
   (const char *)&s_sys_ssp566f6e55, (const char *)"__wakeup",
   (const char *)&s_sys_ssp56c75e05, (const char *)"VALIDATE",
@@ -5187,7 +5192,7 @@ static const char *ss_data0[] = {
   (const char *)&s_sys_ssp6fd67d3d, (const char *)"\000*\000file", (const char *)7LL,
   (const char *)&s_sys_ssp7c4bb61c, (const char *)"\000SplObjectStorage\000storage", (const char *)25LL,
 };
-static int ATTRIBUTE_UNUSED initLiteralStrings0 = StringUtil::InitLiteralStrings(ss_data0, 988, 21);
+static int ATTRIBUTE_UNUSED initLiteralStrings0 = StringUtil::InitLiteralStrings(ss_data0, 989, 21);
 static const char *svs_data0[] = {
   (const char *)&s_sys_svs00000000, (const char *)&s_sys_ss00000000,
   (const char *)&s_sys_svs0514b8b1, (const char *)&s_sys_ss0514b8b1,

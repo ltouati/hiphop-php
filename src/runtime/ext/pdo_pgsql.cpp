@@ -136,7 +136,7 @@ PDOPgSqlStatement::~PDOPgSqlStatement()
         if (this->is_prepared)
         {
             std::string tmp;
-             Util::string_printf(tmp, "DEALLOCATE %s", this->stmt_name->c_str());
+            Util::string_printf(tmp, "DEALLOCATE %s", this->stmt_name->c_str());
             res = PQexec(this->m_server, tmp.c_str());
             if (res)
             {
@@ -183,7 +183,6 @@ PDOPgSqlStatement::~PDOPgSqlStatement()
         this->cursor_name = NULL;
     }
 
-
 }
 
 static long pdo_attr_lval(CArrRef options, int opt, long defaultValue)
@@ -210,6 +209,7 @@ bool PDOPgSqlStatement::create(CStrRef sql, CArrRef driver_options)
         if (this->cursor_name)
         {
             delete(this->cursor_name);
+            this->cursor_name = NULL;
         }
         std::string tmp;
         Util::string_printf(tmp,"pdo_crsr_%08x",++this->m_conn->m_statements);
@@ -270,10 +270,6 @@ bool PDOPgSqlStatement::create(CStrRef sql, CArrRef driver_options)
         std::string tmp = "";
         Util::string_printf(tmp,"pdo_stmt_%08x",++this->m_conn->m_statements);
         this->stmt_name = new std::string(tmp);
-
-        /* that's all for now; we'll defer the actual prepare until the first execute call */
-        Logger::Error("parsed query :%s",this->query.c_str());
-
         this->query = nsql;
 
         return true;
@@ -302,7 +298,6 @@ bool PDOPgSqlConnection::preparer(CStrRef sql, sp_PDOStatement *stmt,
     m_statements++;
     PDOPgSqlStatement *s = new PDOPgSqlStatement(this, m_server);
     *stmt = s;
-    Logger::Warning("preparing %s",sql.c_str());
     if (s->create(sql, options))
     {
         alloc_own_columns = 1;
@@ -372,7 +367,6 @@ bool PDOPgSqlStatement::executer()
 
     if (this->cursor_name!=NULL && this->cursor_name->length()>0)
     {
-        Logger::Error("Cursor is not null:%s",this->cursor_name->c_str());
         char *q = NULL;
 
         if (this->is_prepared)
@@ -404,13 +398,10 @@ bool PDOPgSqlStatement::executer()
     else if (this->stmt_name!=NULL)
     {
         /* using a prepared statement */
-        Logger::Error("Statement name :%s %d",this->stmt_name->c_str(),this->is_prepared);
-
         if (!this->is_prepared)
         {
 stmt_retry:
 
-            Logger::Error("Preparing  stmt name :%s, query:%s",this->stmt_name->c_str(),this->query.c_str());
 
             /* we deferred the prepare until now, because we didn't
              * know anything about the parameter types; now we do */
@@ -456,7 +447,6 @@ stmt_retry:
             }
             }
         }
-        Logger::Error("Executing prepared statement");
         this->result = PQexecPrepared(this->m_server, this->stmt_name->c_str(),
                                       this->bound_params.size(),
                                       (const char**)this->param_values,
@@ -466,7 +456,6 @@ stmt_retry:
     }
     else
     {
-        Logger::Error("Executing active query:%s",this->active_query_string.c_str());
 
         this->result = PQexec(this->m_server, this->active_query_string);
     }
@@ -493,7 +482,6 @@ stmt_retry:
     {
         this->row_count = (long)PQntuples(this->result);
     }
-    Logger::Error("Query returned %d rows",this->row_count);
     return true;
 }
 
@@ -762,8 +750,6 @@ bool PDOPgSqlStatement::paramHook(PDOBoundParam *param,
             /* decode name from $1, $2 into 0, 1 etc. */
             if (param->name.size()>0)
             {
-                Logger::Error("Param:");
-                Logger::Error(param->name);
                 if (param->name.c_str()[0] == '$')
                 {
                     param->paramno = atoi(param->name.c_str() + 1);
@@ -806,14 +792,11 @@ bool PDOPgSqlStatement::paramHook(PDOBoundParam *param,
                 this->param_lengths = (int*)malloc(this->bound_param_map.size()*sizeof(int));
                 this->param_formats = (int*)malloc(this->bound_param_map.size()*sizeof(int));
                 this->param_types = (Oid*)malloc(this->bound_param_map.size()*sizeof(Oid));
-                Logger::Error("Created %d params",this->bound_param_map.size());
             }
             if (param->paramno >= 0)
             {
                 if (param->paramno > this->bound_param_map.size())
                 {
-                    Logger::Error("2");
-
                     this->m_conn->handleError("HY105",PGRES_FATAL_ERROR,__FILE__,__LINE__);
                     return false;
                 }
@@ -866,8 +849,6 @@ bool PDOPgSqlStatement::paramHook(PDOBoundParam *param,
                     }**/
                 }
 
-                Logger::Error("Seeting a param[%d]:%d",param->paramno,PDO_PARAM_TYPE(param->param_type));
-
                 if (PDO_PARAM_TYPE(param->param_type) == PDO_PARAM_NULL ||
                         param->parameter.isNull())
                 {
@@ -883,7 +864,6 @@ bool PDOPgSqlStatement::paramHook(PDOBoundParam *param,
                 else
                 {
                     String tmp = param->parameter.toString();
-                    Logger::Error("Seeting as String:%s",tmp.c_str());
                     this->param_values[param->paramno] = tmp.c_str();
                     this->param_lengths[param->paramno] = tmp.size();
                     this->param_formats[param->paramno] = 0;
@@ -948,7 +928,6 @@ bool PDOPgSqlConnection::create(CArrRef options)
 
 int PDOPgSqlConnection::handleError(const char *codeString,int codeInt,const char *file, int line)
 {
-    Logger::Error("error %s",PQerrorMessage(m_server));
     throw_pdo_exception(null, null, "SQLSTATE[%s] [%d] %s",codeString,
                         codeInt,  PQerrorMessage(m_server));
 

@@ -231,11 +231,12 @@ class c_PDOStatement : public ExtObjectData, public Sweepable {
 
   // implemented by HPHP
   public: c_PDOStatement *create();
-
+  static const ClassPropTable os_prop_table;
 
   public: sp_PDOStatement m_stmt;
   public: Variant m_row;
   public: int m_rowIndex;
+ public: String query_string;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

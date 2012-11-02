@@ -1324,7 +1324,13 @@ DefineFunction(
       'type'   => Variant,
     ),
   ));
-
+DefineProperty(
+   array(
+    'name' => "querystring",
+    'type' => String,
+    'flags' => IsPublic,
+  )
+);
 EndClass(
 );
 
