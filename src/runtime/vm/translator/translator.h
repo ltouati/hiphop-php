@@ -129,6 +129,7 @@ struct SrcKey {
   }
 
   void trace(const char *fmt, ...) const;
+  void print(int ninstr) const;
   int offset() const {
     return m_offset;
   }
@@ -278,6 +279,7 @@ class NormalizedInstruction {
   // StackOff: logical delta at *start* of this instruction to
   // stack at tracelet entry.
   int stackOff;
+  int sequenceNum;
   unsigned hasConstImm:1;
   unsigned startsBB:1;
   unsigned breaksTracelet:1;
@@ -562,6 +564,16 @@ struct Tracelet : private boost::noncopyable {
   ActRecState    m_arState;
   RefDeps        m_refDeps;
 
+  // Live range suport.
+  //
+  // Maintain a per-location last-read and last-written map. We don't need
+  // to remember the start of the live range, since we implicitly discover it
+  // at translation time. The entries in these maps are the sequence number
+  // of the instruction after which the location is no longer read/written.
+  typedef hphp_hash_map<Location, int, Location> RangeMap;
+  RangeMap m_liveEnd;
+  RangeMap m_liveDirtyEnd;
+
   /*
    * If we were unable to make sense of the instruction stream (e.g., it
    * used instructions that the translator does not understand), then this
@@ -581,12 +593,16 @@ struct Tracelet : private boost::noncopyable {
     m_arState(),
     m_analysisFailed(false) { }
 
+  void constructLiveRanges();
+  bool isLiveAfterInstr(Location l, const NormalizedInstruction& i) const;
+  bool isWrittenAfterInstr(Location l, const NormalizedInstruction& i) const;
+
   NormalizedInstruction* newNormalizedInstruction();
   DynLocation* newDynLocation(Location l, DataType t);
   DynLocation* newDynLocation(Location l, RuntimeType t);
   DynLocation* newDynLocation();
 
-  void print();
+  void print() const;
 };
 
 struct TraceletContext {
@@ -596,17 +612,27 @@ struct TraceletContext {
   DepMap      m_resolvedDeps; // dependencies resolved by static analysis
   LocationSet m_changeSet;
   LocationSet m_deletedSet;
+  int         m_numJmps;
   bool        m_aliasTaint;
   bool        m_varEnvTaint;
 
   TraceletContext()
-    : m_t(NULL), m_aliasTaint(false), m_varEnvTaint(false) {}
+    : m_t(NULL)
+    , m_numJmps(0)
+    , m_aliasTaint(false)
+    , m_varEnvTaint(false)
+  {}
   TraceletContext(Tracelet* t)
-    : m_t(t), m_aliasTaint(false), m_varEnvTaint(false) {}
+    : m_t(t)
+    , m_numJmps(0)
+    , m_aliasTaint(false)
+    , m_varEnvTaint(false)
+  {}
   DynLocation* recordRead(const InputInfo& l, bool useHHIR,
                           DataType staticType = KindOfInvalid);
   void recordWrite(DynLocation* dl, NormalizedInstruction* source);
   void recordDelete(const Location& l);
+  void recordJmp();
   void aliasTaint();
   void varEnvTaint();
 
@@ -695,6 +721,8 @@ struct TransRec {
  * Translator annotates a tracelet with input/output locations/types.
  */
 class Translator {
+  static const int MaxJmpsTracedThrough = 5;
+
 public:
   // kFewLocals is a magic value used to decide whether or not to
   // generate specialized code for RetC
@@ -911,6 +939,7 @@ opcodeControlFlowInfo(const Opcode instr) {
     case OpJmpZ:
     case OpJmpNZ:
     case OpSwitch:
+    case OpContExit:
     case OpRetC:
     case OpRetV:
     case OpRaise:
@@ -927,6 +956,7 @@ opcodeControlFlowInfo(const Opcode instr) {
       return ControlFlowBreaksBB;
     case OpFCall:
     case OpFCallArray:
+    case OpContEnter:
     case OpIncl:
     case OpInclOnce:
     case OpReq:

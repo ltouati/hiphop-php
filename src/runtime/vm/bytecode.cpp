@@ -283,33 +283,19 @@ VarEnv::VarEnv(ActRec* fp, ExtraArgs* eArgs)
     }
 }
 
-VarEnv::~VarEnv()
-{
-    TRACE(3, "Destroying VarEnv %p [%s]\n",
-          this,
-          isGlobalScope() ? "global scope" : "local scope");
-    ASSERT(m_restoreLocations.empty());
-    ASSERT(g_vmContext->m_topVarEnv == this);
+VarEnv::~VarEnv() {
+  TRACE(3, "Destroying VarEnv %p [%s]\n",
+           this,
+           isGlobalScope() ? "global scope" : "local scope");
+  ASSERT(m_restoreLocations.empty());
+  if (g_vmContext->m_topVarEnv == this) {
     g_vmContext->m_topVarEnv = m_previous;
+  }
 
-    ASSERT(m_cfp == NULL);
-    if (!isGlobalScope())
-    {
-        if (LIKELY(!m_malloced))
-        {
-            varenv_arena().endFrame();
-            return;
-        }
-    }
-    else
-    {
-        /*
-         * When detaching the global scope, we leak any live objects (and
-         * let the smart allocator clean them up).  This is because we're
-         * not supposed to run destructors for objects that are live at
-         * the end of a request.
-         */
-        m_nvTable->leak();
+  if (!isGlobalScope()) {
+    if (LIKELY(!m_malloced)) {
+      varenv_arena().endFrame();
+      return;
     }
 }
 
@@ -751,11 +737,206 @@ Stack::flush()
 }
 
 void Stack::toStringElm(std::ostream& os, TypedValue* tv, const ActRec* fp)
+<<<<<<< HEAD
 const
 {
     if (tv->_count != 0)
     {
         os << " ??? _count " << tv->_count << " ";
+=======
+  const {
+  if (tv->m_type < MinDataType || tv->m_type > MaxNumDataTypes) {
+    os << " ??? type " << tv->m_type << "\n";
+    return;
+  }
+  ASSERT(tv->m_type >= MinDataType && tv->m_type < MaxNumDataTypes);
+  if (IS_REFCOUNTED_TYPE(tv->m_type) && tv->m_data.pref->_count <= 0) {
+    // OK in the invoking frame when running a destructor.
+    os << " ??? inner_count " << tv->m_data.pref->_count << " ";
+    return;
+  }
+  switch (tv->m_type) {
+  case KindOfRef:
+    os << "V:(";
+    os << "@" << tv->m_data.pref;
+    tv = tv->m_data.pref->tv();  // Unbox so contents get printed below
+    ASSERT(tv->m_type != KindOfRef);
+    toStringElm(os, tv, fp);
+    os << ")";
+    return;
+  case KindOfClass:
+    os << "A:";
+    break;
+  default:
+    os << "C:";
+    break;
+  }
+  switch (tv->m_type) {
+  case KindOfUninit: {
+    os << "Undefined";
+    break;
+  }
+  case KindOfNull: {
+    os << "Null";
+    break;
+  }
+  case KindOfBoolean: {
+    os << (tv->m_data.num ? "True" : "False");
+    break;
+  }
+  case KindOfInt64: {
+    os << "0x" << std::hex << tv->m_data.num << std::dec;
+    break;
+  }
+  case KindOfDouble: {
+    os << tv->m_data.dbl;
+    break;
+  }
+  case KindOfStaticString:
+  case KindOfString: {
+    ASSERT(tv->m_data.pstr->getCount() > 0);
+    int len = tv->m_data.pstr->size();
+    bool truncated = false;
+    if (len > 128) {
+      len = 128;
+      truncated = true;
+    }
+    os << tv->m_data.pstr << ":\""
+       << Util::escapeStringForCPP(tv->m_data.pstr->data(), len)
+       << "\"" << (truncated ? "..." : "");
+    break;
+  }
+  case KindOfArray: {
+    ASSERT(tv->m_data.parr->getCount() > 0);
+    os << tv->m_data.parr << ":Array";
+    break;
+  }
+  case KindOfObject: {
+    ASSERT(tv->m_data.pobj->getCount() > 0);
+    os << tv->m_data.pobj << ":Object("
+       << tvAsVariant(tv).asObjRef().get()->o_getClassName().get()->data()
+       << ")";
+    break;
+  }
+  case KindOfRef: {
+    not_reached();
+  }
+  case KindOfClass: {
+    os << tv->m_data.pcls
+       << ":" << tv->m_data.pcls->name()->data();
+    break;
+  }
+  default: {
+    os << "?";
+    break;
+  }
+  }
+}
+
+void Stack::toStringIter(std::ostream& os, Iter* it) const {
+  switch (it->m_itype) {
+  case Iter::TypeUndefined: {
+    os << "I:Undefined";
+    break;
+  }
+  case Iter::TypeArray: {
+    os << "I:Array";
+    break;
+  }
+  case Iter::TypeMutableArray: {
+    os << "I:MutableArray";
+    break;
+  }
+  case Iter::TypeIterator: {
+    os << "I:Iterator";
+    break;
+  }
+  default: {
+    ASSERT(false);
+    os << "I:?";
+    break;
+  }
+  }
+}
+
+void Stack::toStringFrag(std::ostream& os, const ActRec* fp,
+                         const TypedValue* top) const {
+  TypedValue* tv;
+
+  // The only way to figure out which stack elements are activation records is
+  // to follow the frame chain. However, the goal for each stack frame is to
+  // print stack fragments from deepest to shallowest -- a then b in the
+  // following example:
+  //
+  //   {func:foo,soff:51}<C:8> {func:bar} C:8 C:1 {func:biz} C:0
+  //                           aaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbb
+  //
+  // Use depth-first recursion to get the output order correct.
+
+  if (LIKELY(!fp->m_func->isGenerator())) {
+    tv = frameStackBase(fp);
+  } else {
+    tv = generatorStackBase(fp);
+  }
+
+  for (tv--; (uintptr_t)tv >= (uintptr_t)top; tv--) {
+    os << " ";
+    toStringElm(os, tv, fp);
+  }
+}
+
+void Stack::toStringAR(std::ostream& os, const ActRec* fp,
+                       const FPIEnt *fe, const TypedValue* top) const {
+  ActRec *ar;
+  if (LIKELY(!fp->m_func->isGenerator())) {
+    ar = arAtOffset(fp, -fe->m_fpOff);
+  } else {
+    // Deal with generators' split stacks. See unwindAR for reasoning.
+    TypedValue* genStackBase = generatorStackBase(fp);
+    ActRec* fakePrevFP =
+      (ActRec*)(genStackBase + fp->m_func->numSlotsInFrame());
+    ar = arAtOffset(fakePrevFP, -fe->m_fpOff);
+  }
+
+  if (fe->m_parentIndex != -1) {
+    toStringAR(os, fp, &fp->m_func->fpitab()[fe->m_parentIndex],
+      (TypedValue*)&ar[1]);
+  } else {
+    toStringFrag(os, fp, (TypedValue*)&ar[1]);
+  }
+
+  os << " {func:" << ar->m_func->fullName()->data() << "}";
+  TypedValue* tv = (TypedValue*)ar;
+  for (tv--; (uintptr_t)tv >= (uintptr_t)top; tv--) {
+    os << " ";
+    toStringElm(os, tv, fp);
+  }
+}
+
+void Stack::toStringFragAR(std::ostream& os, const ActRec* fp,
+                           int offset, const TypedValue* top) const {
+  const FPIEnt *fe = fp->m_func->findFPI(offset);
+  if (fe != NULL) {
+    toStringAR(os, fp, fe, top);
+  } else {
+    toStringFrag(os, fp, top);
+  }
+}
+
+void Stack::toStringFrame(std::ostream& os, const ActRec* fp,
+                          int offset, const TypedValue* ftop,
+                          const string& prefix) const {
+  ASSERT(fp);
+
+  // Use depth-first recursion to output the most deeply nested stack frame
+  // first.
+  {
+    Offset prevPc;
+    TypedValue* prevStackTop;
+    ActRec* prevFp = g_vmContext->getPrevVMState(fp, &prevPc, &prevStackTop);
+    if (prevFp != NULL) {
+      toStringFrame(os, prevFp, prevPc, prevStackTop, prefix);
+>>>>>>> facebook/master
     }
     if (tv->m_type < MinDataType || tv->m_type > MaxNumDataTypes)
     {
@@ -861,6 +1042,7 @@ const
     }
 }
 
+<<<<<<< HEAD
 void Stack::toStringIter(std::ostream& os, Iter* it) const
 {
     switch (it->m_itype)
@@ -893,6 +1075,28 @@ void Stack::toStringIter(std::ostream& os, Iter* it) const
     }
     }
 }
+=======
+UnwindStatus Stack::unwindFrag(ActRec* fp, int offset,
+                               PC& pc, Fault& f) {
+  const Func* func = fp->m_func;
+  TRACE(1, "unwindFrag: func %s\n", func->fullName()->data());
+
+  bool unwindingGeneratorFrame = func->isGenerator();
+  TypedValue* evalTop;
+  if (UNLIKELY(unwindingGeneratorFrame)) {
+    ASSERT(!isValidAddress((uintptr_t)fp));
+    evalTop = generatorStackBase(fp);
+  } else {
+    ASSERT(isValidAddress((uintptr_t)fp));
+    evalTop = frameStackBase(fp);
+  }
+  ASSERT(isValidAddress((uintptr_t)evalTop));
+  ASSERT(evalTop >= m_top);
+
+  while (m_top < evalTop) {
+    popTV();
+  }
+>>>>>>> facebook/master
 
 void Stack::toStringFrag(std::ostream& os, const ActRec* fp,
                          const TypedValue* top) const
@@ -935,6 +1139,7 @@ void Stack::toStringAR(std::ostream& os, const ActRec* fp,
         toStringFrag(os, fp, (TypedValue*)&ar[1]);
     }
 
+<<<<<<< HEAD
     os << " {func:" << ar->m_func->fullName()->data() << "}";
     TypedValue* tv = (TypedValue*)ar;
     for (tv--; (uintptr_t)tv >= (uintptr_t)top; tv--)
@@ -942,6 +1147,17 @@ void Stack::toStringAR(std::ostream& os, const ActRec* fp,
         os << " ";
         toStringElm(os, tv, fp);
     }
+=======
+  if (LIKELY(!unwindingGeneratorFrame)) {
+    // A generator's locals don't live on this stack.
+    // onFunctionExit might throw
+    try {
+      frame_free_locals_inl(fp, func->numLocals());
+    } catch (...) {}
+    ndiscard(func->numSlotsInFrame());
+  }
+  return UnwindPropagate;
+>>>>>>> facebook/master
 }
 
 void Stack::toStringFragAR(std::ostream& os, const ActRec* fp,
@@ -958,6 +1174,7 @@ void Stack::toStringFragAR(std::ostream& os, const ActRec* fp,
     }
 }
 
+<<<<<<< HEAD
 void Stack::toStringFrame(std::ostream& os, const ActRec* fp,
                           int offset, const TypedValue* ftop,
                           const string& prefix) const
@@ -996,6 +1213,26 @@ void Stack::toStringFrame(std::ostream& os, const ActRec* fp,
     << std::dec << "}";
     TypedValue* tv = (TypedValue*)fp;
     tv--;
+=======
+void Stack::unwindAR(ActRec* fp, const FPIEnt* fe) {
+  while (true) {
+    TRACE(1, "unwindAR: function %s, pIdx %d\n",
+          fp->m_func->name()->data(), fe->m_parentIndex);
+    ActRec* ar;
+    if (LIKELY(!fp->m_func->isGenerator())) {
+      ar = arAtOffset(fp, -fe->m_fpOff);
+    } else {
+      // fp is pointing into the continuation object. Since fpOff is given as an
+      // offset from the frame pointer as if it were in the normal place on the
+      // main stack, we have to reconstruct that "normal place".
+      TypedValue* genStackBase = generatorStackBase(fp);
+      ActRec* fakePrevFP =
+        (ActRec*)(genStackBase + fp->m_func->numSlotsInFrame());
+      ar = arAtOffset(fakePrevFP, -fe->m_fpOff);
+    }
+    ASSERT((TypedValue*)ar >= m_top);
+    unwindARFrag(ar);
+>>>>>>> facebook/master
 
     if (func->numLocals() > 0)
     {
@@ -1057,6 +1294,7 @@ void Stack::clearEvalStack(ActRec *fp, int32 numLocals)
 {
 }
 
+<<<<<<< HEAD
 UnwindStatus Stack::unwindFrag(ActRec* fp, int offset,
                                PC& pc, Fault& f)
 {
@@ -1069,6 +1307,43 @@ UnwindStatus Stack::unwindFrag(ActRec* fp, int offset,
     {
         popTV();
     }
+=======
+  while (true) {
+    SrcKey sk(fp->m_func, offset);
+    SKTRACE(1, sk, "unwindFrame: func %s, offset %d fp %p\n",
+            fp->m_func->name()->data(),
+            offset, fp);
+    const FPIEnt *fe = fp->m_func->findFPI(offset);
+    if (fe != NULL) {
+      unwindAR(fp, fe);
+    }
+    if (unwindFrag(fp, offset, pc, f) == UnwindResumeVM) {
+      return UnwindResumeVM;
+    }
+    ActRec *prevFp = context->arGetSfp(fp);
+    SKTRACE(1, sk, "unwindFrame: fp %p prevFp %p\n",
+            fp, prevFp);
+    Offset prevOff = fp->m_soff + prevFp->m_func->base();
+    if (LIKELY(!fp->m_func->isGenerator())) {
+      // We don't need to refcount the AR's refcounted members; that was
+      // taken care of in frame_free_locals, called from unwindFrag().
+      // If it's a generator, the AR doesn't live on this stack.
+      discardAR();
+    }
+
+    if (prevFp == fp) {
+      TRACE(1, "unwindFrame: reached the end of this nesting's ActRec "
+               "chain\n");
+      break;
+    }
+    // Keep the pc up to date while unwinding.
+    const Func *prevF = prevFp->m_func;
+    ASSERT(isValidAddress((uintptr_t)prevFp) || prevF->isGenerator());
+    pc = prevF->unit()->at(prevF->base() + fp->m_soff);
+    fp = prevFp;
+    offset = prevOff;
+  }
+>>>>>>> facebook/master
 
     const EHEnt *eh = func->findEH(offset);
     while (eh != NULL)
@@ -1210,6 +1485,24 @@ bool Stack::wouldOverflow(int numCells) const
     return diff < 0;
 }
 
+TypedValue* Stack::frameStackBase(const ActRec* fp) {
+  const Func* func = fp->m_func;
+  ASSERT(!func->isGenerator());
+  return (TypedValue*)((uintptr_t)fp
+                       - (uintptr_t)(func->numLocals()) * sizeof(TypedValue)
+                       - (uintptr_t)(func->numIterators() * sizeof(Iter)));
+}
+
+TypedValue* Stack::generatorStackBase(const ActRec* fp) {
+  // We know generators are always called from a function with an empty stack.
+  // So we find the caller's FP, compensate for its locals, and then we've found
+  // the base of the generator's stack.
+  ASSERT(fp->m_func->isGenerator());
+  ActRec* callerFP = (ActRec*)fp->m_savedRbp;
+  return (TypedValue*)callerFP - callerFP->m_func->numSlotsInFrame();
+}
+
+
 __thread RequestArenaStorage s_requestArenaStorage;
 __thread VarEnvArenaStorage s_varEnvArenaStorage;
 
@@ -1222,6 +1515,7 @@ __thread VarEnvArenaStorage s_varEnvArenaStorage;
 using namespace HPHP::VM;
 using namespace HPHP::MethodLookup;
 
+<<<<<<< HEAD
 ActRec* VMExecutionContext::arGetSfp(const ActRec* ar)
 {
     ActRec* prevFrame = (ActRec*)ar->m_savedRbp;
@@ -1232,6 +1526,27 @@ ActRec* VMExecutionContext::arGetSfp(const ActRec* ar)
         return prevFrame;
     }
     return const_cast<ActRec*>(ar);
+=======
+ActRec* VMExecutionContext::arGetSfp(const ActRec* ar) {
+  ActRec* prevFrame = (ActRec*)ar->m_savedRbp;
+  if (LIKELY(prevFrame >= m_stack.getStackLowAddress() &&
+             prevFrame < m_stack.getStackHighAddress())) {
+    return prevFrame;
+  }
+
+  // Generators have their frames outside the main stack, so prevFrame might
+  // point there. We need to be careful to distinguish this from a prevFrame
+  // that points into the C++ stack.
+  if (!prevFrame) {
+    return const_cast<ActRec*>(ar);
+  }
+  int64* magicPtr = (int64*)(prevFrame + 1);
+  if (*magicPtr == c_Continuation::kMagic) {
+    ASSERT(prevFrame->m_func->isGenerator());
+    return prevFrame;
+  }
+  return const_cast<ActRec*>(ar);
+>>>>>>> facebook/master
 }
 
 TypedValue* VMExecutionContext::lookupClsCns(const NamedEntity* ne,
@@ -2561,6 +2876,7 @@ int VMExecutionContext::hhvmPrepareThrow()
  * set prevPc and prevSp.
  */
 ActRec* VMExecutionContext::getPrevVMState(const ActRec* fp,
+<<<<<<< HEAD
         Offset*       prevPc /* = NULL */,
         TypedValue**  prevSp /* = NULL */)
 {
@@ -2592,6 +2908,23 @@ ActRec* VMExecutionContext::getPrevVMState(const ActRec* fp,
     {
         *prevPc = prevFp->m_func->unit()->offsetOf(vmstate.pc);
     }
+=======
+                                           Offset*       prevPc /* = NULL */,
+                                           TypedValue**  prevSp /* = NULL */) {
+  if (fp == NULL) {
+    return NULL;
+  }
+  ActRec* prevFp = arGetSfp(fp);
+  if (prevFp != fp) {
+    if (prevSp) {
+      if (UNLIKELY(fp->m_func->isGenerator())) {
+        *prevSp = (TypedValue*)prevFp - prevFp->m_func->numSlotsInFrame();
+      } else {
+        *prevSp = (TypedValue*)&fp[1];
+      }
+    }
+    if (prevPc) *prevPc = prevFp->m_func->base() + fp->m_soff;
+>>>>>>> facebook/master
     return prevFp;
 }
 
@@ -3092,6 +3425,7 @@ bool VMExecutionContext::evalUnit(Unit* unit, bool local,
     Stats::inc(Stats::PseudoMain_Executed);
 
 
+<<<<<<< HEAD
     ActRec* ar = m_stack.allocA();
     ASSERT((uintptr_t)&ar->m_func < (uintptr_t)&ar->m_r);
     VM::Class* cls = curClass();
@@ -3143,6 +3477,49 @@ bool VMExecutionContext::evalUnit(Unit* unit, bool local,
     SYNC();
     EventHook::FunctionEnter(m_fp, funcType);
     return true;
+=======
+  ActRec* ar = m_stack.allocA();
+  ASSERT((uintptr_t)&ar->m_func < (uintptr_t)&ar->m_r);
+  VM::Class* cls = curClass();
+  if (local) {
+    cls = NULL;
+    ar->setThis(NULL);
+  } else if (m_fp->hasThis()) {
+    ObjectData *this_ = m_fp->getThis();
+    this_->incRefCount();
+    ar->setThis(this_);
+  } else if (m_fp->hasClass()) {
+    ar->setClass(m_fp->getClass());
+  } else {
+    ar->setThis(NULL);
+  }
+  Func* func = unit->getMain(cls);
+  ASSERT(!func->isBuiltin());
+  ASSERT(!func->isGenerator());
+  ar->m_func = func;
+  ar->initNumArgs(0);
+  ASSERT(getFP());
+  ASSERT(!m_fp->hasInvName());
+  arSetSfp(ar, m_fp);
+  ar->m_soff = uintptr_t(m_fp->m_func->unit()->offsetOf(pc) -
+                         m_fp->m_func->base());
+  ar->m_savedRip = (uintptr_t)tx64->getRetFromInterpretedFrame();
+  pushLocalsAndIterators(func);
+  if (local) {
+    ar->m_varEnv = 0;
+  } else {
+    if (!m_fp->hasVarEnv()) {
+      m_fp->m_varEnv = VarEnv::createLazyAttach(m_fp);
+    }
+    ar->m_varEnv = m_fp->m_varEnv;
+    ar->m_varEnv->attach(ar);
+  }
+  m_fp = ar;
+  pc = func->getEntry();
+  SYNC();
+  EventHook::FunctionEnter(m_fp, funcType);
+  return true;
+>>>>>>> facebook/master
 }
 
 CVarRef VMExecutionContext::getEvaledArg(const StringData* val)
@@ -5204,6 +5581,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSwitch(PC& pc)
     }
 }
 
+<<<<<<< HEAD
 inline void OPTBLD_INLINE VMExecutionContext::iopRetC(PC& pc)
 {
     NEXT();
@@ -5218,6 +5596,31 @@ inline void OPTBLD_INLINE VMExecutionContext::iopRetC(PC& pc)
     m_stack.ndiscard(m_fp->m_func->numSlotsInFrame() + 1);
 
     if (LIKELY(sfp != m_fp))
+=======
+inline void OPTBLD_INLINE VMExecutionContext::iopRetC(PC& pc) {
+  NEXT();
+  uint soff = m_fp->m_soff;
+  ASSERT(!m_fp->m_func->isGenerator());
+
+  // Call the runtime helpers to free the local variables and iterators
+  frame_free_locals_inl(m_fp, m_fp->m_func->numLocals());
+  ActRec* sfp = arGetSfp(m_fp);
+  // Memcpy the the return value on top of the activation record. This works
+  // the same regardless of whether the return value is boxed or not.
+  memcpy(&(m_fp->m_r), m_stack.topTV(), sizeof(TypedValue));
+  // Adjust the stack
+  m_stack.ndiscard(m_fp->m_func->numSlotsInFrame() + 1);
+
+  if (LIKELY(sfp != m_fp)) {
+    // Restore caller's execution state.
+    m_fp = sfp;
+    pc = m_fp->m_func->unit()->entry() + m_fp->m_func->base() + soff;
+    m_stack.ret();
+  } else {
+    // No caller; terminate.
+    m_stack.ret();
+#ifdef HPHP_TRACE
+>>>>>>> facebook/master
     {
         // Restore caller's execution state.
         m_fp = sfp;
@@ -7083,6 +7486,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCufSafeArray(PC& pc)
     tvAsVariant(m_stack.top()) = ret;
 }
 
+<<<<<<< HEAD
 inline void OPTBLD_INLINE VMExecutionContext::iopCufSafeReturn(PC& pc)
 {
     NEXT();
@@ -7092,6 +7496,17 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCufSafeReturn(PC& pc)
     if (ok) m_stack.top()[2] = m_stack.top()[0];
     m_stack.ndiscard(2);
 }
+=======
+    ASSERT(ar->m_savedRbp == (uint64_t)m_fp);
+    ASSERT(!ar->m_func->isGenerator());
+    ar->m_savedRip = (uintptr_t)tx64->getRetFromInterpretedFrame();
+    TRACE(3, "FCallArray: pc %p func %p base %d\n", m_pc,
+          m_fp->m_func->unit()->entry(),
+          int(m_fp->m_func->base()));
+    ar->m_soff = m_fp->m_func->unit()->offsetOf(pc)
+      - (uintptr_t)m_fp->m_func->base();
+    ASSERT(pcOff() > m_fp->m_func->base());
+>>>>>>> facebook/master
 
 inline void OPTBLD_INLINE VMExecutionContext::iopIterInit(PC& pc)
 {
@@ -7785,6 +8200,7 @@ c_Continuation*
 VMExecutionContext::createContinuation(ActRec* fp,
                                        bool getArgs,
                                        const Func* origFunc,
+<<<<<<< HEAD
                                        const Func* genFunc)
 {
     Object obj;
@@ -7819,10 +8235,62 @@ VMExecutionContext::createContinuation(ActRec* fp,
 
     cont->m_nLocals = nLocals;
     return cont;
+=======
+                                       const Func* genFunc) {
+  Object obj;
+  Array args;
+  if (fp->hasThis()) {
+    obj = fp->getThis();
+  }
+  if (getArgs) {
+    args = hhvm_get_frame_args(fp);
+  }
+  static const StringData* closure = StringData::GetStaticString("{closure}");
+  const StringData* origName =
+    origFunc->isClosureBody() ? closure : origFunc->fullName();
+  int nLocals = genFunc->numLocals();
+  int nIters = genFunc->numIterators();
+  Class* genClass = SystemLib::s_ContinuationClass;
+  c_Continuation* cont = c_Continuation::alloc(genClass, nLocals, nIters);
+  cont->create((int64)0, (int64)genFunc, isMethod,
+               StrNR(const_cast<StringData*>(origName)), obj, args);
+  cont->incRefCount();
+  cont->setNoDestruct();
+
+  // The ActRec corresponding to the generator body lives as long as the object
+  // does. We set it up once, here, and then just change FP to point to it when
+  // we enter the generator body.
+  ActRec* ar = cont->actRec();
+  ar->m_func = genFunc;
+  if (isMethod) {
+    if (obj.get()) {
+      ObjectData* objData = obj.get();
+      ar->setThis(objData);
+      objData->incRefCount();
+    } else {
+      ar->setClass(frameStaticClass(fp));
+    }
+  } else {
+    ar->setThis(NULL);
+  }
+  ar->initNumArgs(1);
+  ar->setVarEnv(NULL);
+
+  TypedValue* contLocal = frame_local(ar, 0);
+  contLocal->m_type = KindOfObject;
+  contLocal->m_data.pobj = cont;
+  // Do not incref the continuation here! Doing so will create a reference
+  // cycle, since this reference is a local in the continuation frame and thus
+  // will be decreffed when the continuation is destroyed. The corresponding
+  // non-decref is in ~c_Continuation.
+
+  return cont;
+>>>>>>> facebook/master
 }
 
 static inline void setContVar(const Func* genFunc,
                               const StringData* name,
+<<<<<<< HEAD
                               CVarRef value,
                               int nLocals,
                               c_Continuation* cont)
@@ -7838,10 +8306,28 @@ static inline void setContVar(const Func* genFunc,
         dest = &cont->getVars().lval(*(String*)&name);
     }
     dest->setWithRef(value);
+=======
+                              TypedValue* src,
+                              c_Continuation* cont) {
+  Id destId = genFunc->lookupVarId(name);
+  if (destId != kInvalidId) {
+    tvDup(src, frame_local(cont->actRec(), destId));
+  } else {
+    ActRec *contFP = cont->actRec();
+    if (!contFP->hasVarEnv()) {
+      // We pass skipInsert to this VarEnv because it's going to exist
+      // independent of the chain; i.e. we can't stack-allocate it. We link it
+      // into the chain in UnpackCont, and take it out in PackCont.
+      contFP->setVarEnv(VarEnv::createLazyAttach(contFP, true));
+    }
+    contFP->getVarEnv()->setWithRef(name, src);
+  }
+>>>>>>> facebook/master
 }
 
 c_Continuation*
 VMExecutionContext::fillContinuationVars(ActRec* fp,
+<<<<<<< HEAD
         const Func* origFunc,
         const Func* genFunc,
         c_Continuation* cont)
@@ -7886,6 +8372,43 @@ VMExecutionContext::fillContinuationVars(ActRec* fp,
         {
             tvAsVariant(&cont->locals()[nLocals - id]) = cont->m_obj;
         }
+=======
+                                         const Func* origFunc,
+                                         const Func* genFunc,
+                                         c_Continuation* cont) {
+  // For functions that contain only named locals, the variable
+  // environment is saved and restored by teleporting the values (and
+  // their references) between the evaluation stack and the local
+  // space at the end of the object using memcpy. Any variables in a
+  // VarEnv are saved and restored from m_vars as usual.
+  static const StringData* thisStr = StringData::GetStaticString("this");
+  int nLocals = genFunc->numLocals();
+  bool skipThis;
+  if (fp->hasVarEnv()) {
+    Stats::inc(Stats::Cont_CreateVerySlow);
+    Array definedVariables = fp->getVarEnv()->getDefinedVariables();
+    skipThis = definedVariables.exists("this", true);
+
+    for (ArrayIter iter(definedVariables); !iter.end(); iter.next()) {
+      setContVar(genFunc, iter.first().getStringData(),
+                 const_cast<TypedValue*>(iter.secondRef().asTypedValue()), cont);
+    }
+  } else {
+    skipThis = origFunc->lookupVarId(thisStr) != kInvalidId;
+    for (Id i = 0; i < origFunc->numNamedLocals(); ++i) {
+      setContVar(genFunc, origFunc->localVarName(i),
+                 frame_local(fp, i), cont);
+    }
+  }
+
+  // If $this is used as a local inside the body and is not provided
+  // by our containing environment, just prefill it here instead of
+  // using InitThisLoc inside the body
+  if (!skipThis && cont->m_obj.get()) {
+    Id id = genFunc->lookupVarId(thisStr);
+    if (id != kInvalidId) {
+      tvAsVariant(&cont->locals()[nLocals - id - 1]) = cont->m_obj;
+>>>>>>> facebook/master
     }
     return cont;
 }
@@ -7919,6 +8442,7 @@ static inline c_Continuation* frame_continuation(ActRec* fp)
     return static_cast<c_Continuation*>(obj);
 }
 
+<<<<<<< HEAD
 int VMExecutionContext::unpackContinuation(c_Continuation* cont,
         TypedValue* dest)
 {
@@ -8001,6 +8525,67 @@ void VMExecutionContext::packContinuation(c_Continuation* cont,
     }
 
     cont->c_Continuation::t_update(label, tvAsCVarRef(value));
+=======
+static inline c_Continuation* this_continuation(ActRec* fp) {
+  ObjectData* obj = fp->getThis();
+  ASSERT(dynamic_cast<c_Continuation*>(obj));
+  return static_cast<c_Continuation*>(obj);
+}
+
+void VMExecutionContext::iopContEnter(PC& pc) {
+  NEXT();
+
+  // The stack must be empty! Or else generatorStackBase() won't work!
+  ASSERT(m_stack.top() == (TypedValue*)m_fp - m_fp->m_func->numSlotsInFrame());
+
+  // Do linkage of the continuation's AR.
+  ASSERT(m_fp->hasThis());
+  c_Continuation* cont = this_continuation(m_fp);
+  ActRec* contAR = cont->actRec();
+  arSetSfp(contAR, m_fp);
+
+  contAR->m_soff = m_fp->m_func->unit()->offsetOf(pc)
+    - (uintptr_t)m_fp->m_func->base();
+  contAR->m_savedRip = (uintptr_t)tx64->getRetFromInterpretedGeneratorFrame();
+
+  m_fp = contAR;
+  pc = contAR->m_func->getEntry();
+}
+
+void VMExecutionContext::iopContExit(PC& pc) {
+  NEXT();
+
+  ActRec* prevFp = arGetSfp(m_fp);
+  pc = prevFp->m_func->getEntry() + m_fp->m_soff;
+  m_fp = prevFp;
+}
+
+void VMExecutionContext::unpackContVarEnvLinkage(ActRec* fp) {
+  // This is called from the TC, and is assumed not to reenter.
+  if (fp->hasVarEnv()) {
+    VarEnv*& topVE = g_vmContext->m_topVarEnv;
+    fp->getVarEnv()->setPrevious(topVE);
+    topVE = fp->getVarEnv();
+  }
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopUnpackCont(PC& pc) {
+  NEXT();
+  c_Continuation* cont = frame_continuation(m_fp);
+
+  unpackContVarEnvLinkage(m_fp);
+
+  // Return the label in a stack cell
+  TypedValue* ret = m_stack.allocTV();
+  ret->m_type = KindOfInt64;
+  ret->m_data.num = cont->m_label;
+}
+
+void VMExecutionContext::packContVarEnvLinkage(ActRec* fp) {
+  if (fp->hasVarEnv()) {
+    g_vmContext->m_topVarEnv = fp->getVarEnv()->previous();
+  }
+>>>>>>> facebook/master
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopPackCont(PC& pc)
@@ -8009,8 +8594,14 @@ inline void OPTBLD_INLINE VMExecutionContext::iopPackCont(PC& pc)
     DECODE_IVA(label);
     c_Continuation* cont = frame_continuation(m_fp);
 
+<<<<<<< HEAD
     packContinuation(cont, m_fp, m_stack.topTV(), label);
     m_stack.popTV();
+=======
+  packContVarEnvLinkage(m_fp);
+  cont->c_Continuation::t_update(label, tvAsCVarRef(m_stack.topTV()));
+  m_stack.popTV();
+>>>>>>> facebook/master
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopContReceive(PC& pc)
@@ -8038,6 +8629,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContDone(PC& pc)
     cont->t_done();
 }
 
+<<<<<<< HEAD
 static inline c_Continuation* this_continuation(ActRec* fp)
 {
     ObjectData* obj = fp->getThis();
@@ -8085,6 +8677,13 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContNext(PC& pc)
     c_Continuation* cont = this_continuation(m_fp);
     cont->preNext();
     cont->m_received.setNull();
+=======
+inline void OPTBLD_INLINE VMExecutionContext::iopContNext(PC& pc) {
+  NEXT();
+  c_Continuation* cont = this_continuation(m_fp);
+  cont->preNext();
+  cont->m_received.setNull();
+>>>>>>> facebook/master
 }
 
 template<bool raise>
@@ -8233,6 +8832,16 @@ void VMExecutionContext::DumpCurUnit(int skip)
     }
     printf("Dumping bytecode for %s(%p)\n", u->filepath()->data(), u);
     std::cout << u->toString();
+}
+
+void VMExecutionContext::PrintTCCallerInfo() {
+  VMRegAnchor _;
+  ActRec* fp = g_vmContext->getFP();
+  Unit* u = fp->m_func->unit();
+  printf("Called from TC address %p\n",
+         TranslatorX64::Get()->getTranslatedCaller());
+  std::cout << u->filepath()->data() << ':'
+            << u->getLineNumber(u->offsetOf(g_vmContext->getPC())) << std::endl;
 }
 
 static inline void

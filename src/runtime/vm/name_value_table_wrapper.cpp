@@ -101,6 +101,15 @@ CVarRef NameValueTableWrapper::get(CVarRef k, bool error) const {
   return get(k.toString(), error);
 }
 
+TypedValue* NameValueTableWrapper::nvGet(const StringData* k) const {
+  return m_tab->lookup(k);
+}
+
+TypedValue* NameValueTableWrapper::nvGet(int64 k) const {
+  Variant k2(k);
+  return m_tab->lookup(k2.toString().get());
+}
+
 ssize_t NameValueTableWrapper::getIndex(int64 k) const {
   return getIndex(Variant(k));
 }
@@ -327,6 +336,17 @@ bool NameValueTableWrapper::setFullPos(const FullPos& fp) {
   }
   return false;
 }
+
+ArrayData* NameValueTableWrapper::escalateForSort() {
+  raise_warning("Sorting the $GLOBALS array is not supported");
+  return this;
+}
+void NameValueTableWrapper::ksort(int sort_flags, bool ascending) {}
+void NameValueTableWrapper::sort(int sort_flags, bool ascending) {}
+void NameValueTableWrapper::asort(int sort_flags, bool ascending) {}
+void NameValueTableWrapper::uksort(CVarRef cmp_function) {}
+void NameValueTableWrapper::usort(CVarRef cmp_function) {}
+void NameValueTableWrapper::uasort(CVarRef cmp_function) {}
 
 //////////////////////////////////////////////////////////////////////
 

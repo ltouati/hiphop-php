@@ -27,6 +27,7 @@
 #include <runtime/base/runtime_option.h>
 #include <runtime/base/types.h>
 #include <runtime/base/tv_macros.h>
+#include <runtime/ext/ext_continuation.h>
 #include <util/trace.h>
 #include <util/biased_coin.h>
 #include <runtime/vm/hhbc.h>
@@ -83,6 +84,46 @@ void InstrStream::remove(NormalizedInstruction* ni) {
   ni->next = NULL;
 }
 
+void Tracelet::constructLiveRanges() {
+  // Helper function.
+  auto considerLoc = [this](DynLocation* dloc,
+                            const NormalizedInstruction* ni,
+                            bool output) {
+    if (!dloc) return;
+    Location loc = dloc->location;
+    m_liveEnd[loc] = ni->sequenceNum;
+    if (output) m_liveDirtyEnd[loc] = ni->sequenceNum;
+  };
+  // We assign each instruction a sequence number. We do this here, rather
+  // than when creating the instruction, to allow splicing and removing
+  // instructions 
+  int sequenceNum = 0;
+  for (auto ni = m_instrStream.first; ni; ni = ni->next) {
+    ni->sequenceNum = sequenceNum++;
+    considerLoc(ni->outLocal, ni, true);
+    considerLoc(ni->outStack3, ni, true);
+    considerLoc(ni->outStack2, ni, true);
+    considerLoc(ni->outStack, ni, true);
+    for (auto inp : ni->inputs) {
+      considerLoc(inp, ni, false);
+    }
+  }
+}
+
+bool Tracelet::isLiveAfterInstr(Location l,
+                                const NormalizedInstruction& ni) const {
+  const auto end = m_liveEnd.find(l);
+  ASSERT(end != m_liveEnd.end());
+  return ni.sequenceNum < end->second;
+}
+
+bool Tracelet::isWrittenAfterInstr(Location l,
+                                   const NormalizedInstruction& ni) const {
+  const auto end = m_liveDirtyEnd.find(l);
+  if (end == m_liveDirtyEnd.end()) return false;
+  return ni.sequenceNum < end->second;
+}
+
 NormalizedInstruction* Tracelet::newNormalizedInstruction() {
   NormalizedInstruction* ni = new NormalizedInstruction();
   m_instrs.push_back(ni);
@@ -107,8 +148,8 @@ DynLocation* Tracelet::newDynLocation() {
   return dl;
 }
 
-void Tracelet::print() {
-  NormalizedInstruction* i = m_instrStream.first;
+void Tracelet::print() const {
+  const NormalizedInstruction* i = m_instrStream.first;
   if (i == NULL) {
     std::cerr << "<empty>\n";
     return;
@@ -139,6 +180,20 @@ SrcKey::trace(const char *fmt, ...) const {
   va_start(a, fmt);
   Trace::vtrace(fmt, a);
   va_end(a);
+}
+
+void
+SrcKey::print(int ninstrs) const {
+  const Unit* u = curUnit();
+  Opcode* op = (Opcode*)u->at(m_offset);
+  std::cerr << u->filepath()->data() << ':' << u->getLineNumber(m_offset)
+            << std::endl;
+  for (int i = 0;
+       i < ninstrs && (uintptr_t)op < ((uintptr_t)u->entry() + u->bclen());
+       op += instrLen(op), ++i) {
+    std::cerr << "  " << u->offsetOf(op) << ": " << instrToString(op, u)
+              << std::endl;
+  }
 }
 
 // advance --
@@ -205,7 +260,7 @@ RuntimeType Translator::liveType(Location l, const Unit& u) {
       not_reached();
     }
   }
-  ASSERT(outer->m_type >= MinDataType && outer->m_type < MaxNumDataTypes);
+  ASSERT(IS_REAL_TYPE(outer->m_type));
   return liveType(outer, l);
 }
 
@@ -216,13 +271,14 @@ Translator::liveType(const Cell* outer, const Location& l) {
     return RuntimeType(KindOfRef, KindOfNull);
   }
   DataType outerType = (DataType)outer->m_type;
+  ASSERT(IS_REAL_TYPE(outerType));
   DataType valueType = outerType;
-  DataType innerType = KindOfInvalid;
   const Cell* valCell = outer;
   if (outerType == KindOfRef) {
     // Variant. Pick up the inner type, too.
     valCell = outer->m_data.pref->tv();
     DataType innerType = valCell->m_type;
+    ASSERT(IS_REAL_TYPE(innerType));
     valueType = innerType;
     ASSERT(innerType != KindOfRef);
     TRACE(2, "liveType Var -> %d\n", innerType);
@@ -236,7 +292,7 @@ Translator::liveType(const Cell* outer, const Location& l) {
     }
   }
   TRACE(2, "liveType %d\n", outerType);
-  RuntimeType retval = RuntimeType(outerType, innerType, klass);
+  RuntimeType retval = RuntimeType(outerType, KindOfInvalid, klass);
   return retval;
 }
 
@@ -967,7 +1023,7 @@ static const struct {
   { OpSetOpN,      {StackTop2,        Stack1|Local, OutUnknown,       -1 }},
   { OpSetOpG,      {StackTop2,        Stack1|Local, OutUnknown,       -1 }},
   { OpSetOpS,      {StackTop3,        Stack1,       OutUnknown,       -2 }},
-  { OpSetOpM,      {MVector|Stack1,   Stack1,       OutUnknown,        0 }},
+  { OpSetOpM,      {MVector|Stack1,   Stack1|Local, OutUnknown,        0 }},
   { OpIncDecL,     {Local,            Stack1|Local, OutIncDec,         1 }},
   { OpIncDecN,     {Stack1,           Stack1|Local, OutUnknown,        0 }},
   { OpIncDecG,     {Stack1,           Stack1|Local, OutUnknown,        0 }},
@@ -1009,9 +1065,6 @@ static const struct {
                                                          kNumActRecCells }},
   { OpFPushCtorD,  {None,             Stack1|FStack,OutObject,
                                                      kNumActRecCells + 1 }},
-  { OpFPushContFunc,
-                   {None,             FStack,       OutFDesc,
-                                                         kNumActRecCells }},
   { OpFPushCuf,    {Stack1,           FStack,       OutFDesc,
                                                      kNumActRecCells - 1 }},
   { OpFPushCufF,   {Stack1,           FStack,       OutFDesc,
@@ -1092,6 +1145,8 @@ static const struct {
   /*** 14. Continuation instructions ***/
 
   { OpCreateCont,  {None,             Stack1,       OutObject,         1 }},
+  { OpContEnter,   {None,             None,         OutNone,           0 }},
+  { OpContExit,    {None,             None,         OutNone,           0 }},
   { OpUnpackCont,  {Local,            Stack1|Local, OutInt64,          1 }},
   { OpPackCont,    {Local|Stack1,     Local,        OutNone,          -1 }},
   { OpContRaised,  {Local,            None,         OutNone,           0 }},
@@ -1207,7 +1262,7 @@ void Translator::analyzeSecondPass(Tracelet& t) {
           prevOp == OpGte || prevOp == OpLte ||
           prevOp == OpEq || prevOp == OpNeq ||
           prevOp == OpIssetL || prevOp == OpAKExists ||
-          isTypePred(prevOp) ||
+          isTypePred(prevOp) || prevOp == OpInstanceOfD ||
           prev->fuseBranch) {
         prev->breaksTracelet = true;
         prev->changesPC = true; // Dont generate generic glue.
@@ -1861,7 +1916,7 @@ void Translator::getOutputs(/*inout*/ Tracelet& t,
   varEnvTaint = false;
 
   const vector<DynLocation*>& inputs = ni->inputs;
-  Opcode op = ni->op();
+  Op op = ni->op();
 
   initInstrInfo();
   assert_not_implemented(instrInfo.find(op) != instrInfo.end());
@@ -2306,6 +2361,10 @@ void TraceletContext::varEnvTaint() {
   }
 }
 
+void TraceletContext::recordJmp() {
+  m_numJmps++;
+}
+
 /*
  *   Helpers for recovering context of this instruction.
  */
@@ -2450,6 +2509,7 @@ void Translator::analyze(const SrcKey *csk, Tracelet& t) {
   SrcKey sk = *csk; // copy for local use
   const Unit *unit = curUnit();
   for (;; sk.advance(unit)) {
+  head:
     NormalizedInstruction* ni = t.newNormalizedInstruction();
     ni->source = sk;
     ni->stackOff = stackFrameOffset;
@@ -2670,12 +2730,20 @@ void Translator::analyze(const SrcKey *csk, Tracelet& t) {
     }
 
     // Check if we need to break the tracelet.
-    //
-    // Note that if an instruction is interpreted and it can change PC, we
-    // have to break the tracelet even if opcodeBreaksBB() returns false
-    // because the translator is not equipped to continue after interpOne()
-    // changes PC.
-    if (opcodeBreaksBB(ni->op()) ||
+    // 
+    // If we've gotten this far, it mostly boils down to control-flow
+    // instructions. However, we'll trace through a few unconditional jmps.
+    if (ni->op() == OpJmp &&
+        ni->imm[0].u_IA > 0 &&
+        tas.m_numJmps < MaxJmpsTracedThrough) {
+      // Continue tracing through jumps. To prevent pathologies, only trace
+      // through a finite number of forward jumps.
+      SKTRACE(1, sk, "greedily continuing through %dth jmp + %d\n",
+              tas.m_numJmps, ni->imm[0].u_IA);
+      tas.recordJmp();
+      sk = SrcKey(curFunc(), sk.m_offset + ni->imm[0].u_IA);
+      goto head; // don't advance sk
+    } else if (opcodeBreaksBB(ni->op()) ||
         (ni->m_txFlags == Interp && opcodeChangesPC(ni->op()))) {
       SKTRACE(1, sk, "BB broken\n");
       sk.advance(unit);
@@ -2737,6 +2805,8 @@ breakBB:
   for (; it != tas.m_changeSet.end(); ++it) {
     t.m_changes[*it] = tas.m_currentMap[*it];
   }
+
+  t.constructLiveRanges();
 
   TRACE(1, "Tracelet done: stack delta %d\n", t.m_stackChange);
 }

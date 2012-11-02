@@ -388,6 +388,7 @@ const X64Instr instr_shrd =    { { 0xAD,0xF1,0xAC,0x00,0xF1,0xF1 }, 0x0082 };
 const X64Instr instr_int3 =    { { 0xF1,0xF1,0xF1,0x00,0xF1,0xCC }, 0x0500 };
 
 enum ConditionCode {
+  CC_None = -1,
   CC_O    = 0x00,
   CC_NO   = 0x01,
 
@@ -443,6 +444,17 @@ inline bool deltaFits(int64_t delta, int s) {
    * but a bitwise test on (1ull << s * 8) would probably avoid a branch.
    */
   return delta < (1ll << (bits-1)) && delta >= -(1ll << (bits-1));
+}
+
+// The unsigned equivalent of deltaFits
+inline bool magFits(uint64_t val, int s) {
+  // sz::qword is always true
+  ASSERT(s == sz::byte ||
+         s == sz::word ||
+         s == sz::dword);
+  int bits = s * 8;
+
+  return (val & ((1ull << bits) - 1)) == val;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1506,6 +1518,12 @@ public:
                       register_name_t rindex, int scale, int disp,      \
                       register_name_t rdest) {                          \
     emitMR(instr_ ## name, rbase, rindex, scale, disp, rdest);          \
+  }                                                                     \
+  /* opq imm, disp(rdest, rindex, scale) */                             \
+  inline void name ## _imm64_index_scale_disp_reg64(                    \
+    int64 imm, register_name_t rindex, int scale, int disp,             \
+    register_name_t rdest) {                                            \
+    emitIM(instr_ ## name, rdest, rindex, scale, disp, imm);             \
   }
 
   SCALED_OP(add)

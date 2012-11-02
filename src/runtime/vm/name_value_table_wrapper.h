@@ -76,6 +76,9 @@ public: // ArrayData implementation
   virtual CVarRef get(CStrRef k, bool error = false) const;
   virtual CVarRef get(CVarRef k, bool error = false) const;
 
+  virtual TypedValue* nvGet(int64 k) const;
+  virtual TypedValue* nvGet(const StringData* k) const;
+
   virtual ssize_t getIndex(int64 k) const;
   virtual ssize_t getIndex(litstr k) const;
   virtual ssize_t getIndex(CStrRef k) const;
@@ -128,6 +131,14 @@ public: // ArrayData implementation
   virtual Variant each();
   virtual void getFullPos(FullPos&);
   virtual bool setFullPos(const FullPos&);
+
+  virtual ArrayData* escalateForSort();
+  virtual void ksort(int sort_flags, bool ascending);
+  virtual void sort(int sort_flags, bool ascending);
+  virtual void asort(int sort_flags, bool ascending);
+  virtual void uksort(CVarRef cmp_function);
+  virtual void usort(CVarRef cmp_function);
+  virtual void uasort(CVarRef cmp_function);
 
 private:
   NameValueTable* const m_tab;

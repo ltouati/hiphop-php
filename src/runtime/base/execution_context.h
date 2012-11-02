@@ -438,9 +438,8 @@ public:
   static c_Continuation* fillContinuationVars(
     VM::ActRec* fp, const VM::Func* origFunc, const VM::Func* genFunc,
     c_Continuation* cont);
-  static int unpackContinuation(c_Continuation* cont, TypedValue* dest);
-  static void packContinuation(c_Continuation* cont, VM::ActRec* fp,
-                               TypedValue* value, int label);
+  static void unpackContVarEnvLinkage(VM::ActRec* fp);
+  static void packContVarEnvLinkage(VM::ActRec* fp);
   void pushLocalsAndIterators(const HPHP::VM::Func* f, int nparams = 0);
 
 private:
@@ -557,6 +556,7 @@ public:
   std::string prettyStack(const std::string& prefix) const;
   static void DumpStack();
   static void DumpCurUnit(int skip = 0);
+  static void PrintTCCallerInfo();
 
   VM::VarEnv* m_globalVarEnv;
   VM::VarEnv* m_topVarEnv;

@@ -476,6 +476,8 @@ void PreClassRepoProxy::GetPreClassesStmt
 ClassPtr Class::newClass(PreClass* preClass, Class* parent) {
   unsigned classVecLen = (parent != NULL) ? parent->m_classVecLen+1 : 1;
   void* mem = Util::low_malloc(sizeForNClasses(classVecLen));
+  assert(IMPLIES(alwaysLowMem(), ptr_is_low_mem(mem)) &&
+         "All Classes must be allocated at 32-bit addresses");
   try {
     return ClassPtr(new (mem) Class(preClass, parent, classVecLen));
   } catch (...) {
@@ -2384,36 +2386,6 @@ void Class::setSPropData(TypedValue* sPropData) const {
       Transl::TargetCache::allocClassInitSProp(name());
   }
   handleToRef<TypedValue*>(m_propSDataCache) = sPropData;
-}
-
-const Func* Class::wouldCall(const Func* prev) const {
-  if (LIKELY(m_methods.size() > prev->methodSlot())) {
-    const Func* cand = m_methods[prev->methodSlot()];
-    /* If this class has the same func at the same method slot
-       we're good to go. No need to recheck permissions,
-       since we already checked them first time around */
-    if (LIKELY(cand == prev)) return cand;
-    if (prev->attrs() & AttrPrivate) {
-      /* If the previously called function was private, then
-         the context class must be prev->cls() - so its
-         definitely accessible. So if this derives from
-         prev->cls() its the function that would be picked.
-         Note that we can only get here if there is a same
-         named function deeper in the class hierarchy */
-      if (this->classof(prev->cls())) return prev;
-    }
-    if (cand->name() == prev->name()) {
-      /*
-       * We have the same name - so its probably the right function.
-       * If its not public, check that both funcs were originally
-       * defined in the same base class.
-       */
-      if ((cand->attrs() & AttrPublic) || cand->baseCls() == prev->baseCls()) {
-        return cand;
-      }
-    }
-  }
-  return NULL;
 }
 
 } } // HPHP::VM

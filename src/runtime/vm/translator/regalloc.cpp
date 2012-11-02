@@ -47,7 +47,8 @@ RegAlloc::RegAlloc(RegSet callerSaved,
     m_numRegs(callerSaved.size() + calleeSaved.size()),
     m_allRegs(callerSaved | calleeSaved),
     m_spf(spf),
-    m_freezeCount(0)
+    m_freezeCount(0),
+    m_branchSynced(false)
 {
   ASSERT(m_calleeSaved - m_callerSaved == m_calleeSaved);
   reset();
@@ -229,6 +230,17 @@ RegAlloc::getRegsLike(RegInfo::State state) const {
   return retval;
 }
 
+bool
+RegAlloc::hasDirtyRegs(int firstUnreachableStk) const {
+  FOR_EACH_REG(r) {
+    if (r->m_state == RegInfo::DIRTY &&
+        !r->m_cont.isUnreachableStack(firstUnreachableStk)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 PhysReg
 RegAlloc::getReg(const Location& loc) {
   PhysReg reg = mapGet(m_contToRegMap, RegContent(loc), InvalidReg);
@@ -282,6 +294,7 @@ RegAlloc::reset() {
     // Put the most favorable register last, so it is picked first.
     m_lru[(m_numRegs - 1) - i] = pr;
   }
+  m_branchSynced = false;
   verify();
 }
 
@@ -762,9 +775,7 @@ RegAlloc::bindScratch(LazyScratchReg& reg, const Location& loc, DataType t,
 void
 RegAlloc::scrubStackEntries(int firstUnreachable) {
   FOR_EACH_REG(r) {
-    if (r->m_cont.isLoc() &&
-        r->m_cont.m_loc.space == Location::Stack &&
-        r->m_cont.m_loc.offset >= firstUnreachable) {
+    if (r->m_cont.isUnreachableStack(firstUnreachable)) {
       TRACE(1, "scrubbing dead stack value: (Stack, %lld)\n",
             r->m_cont.m_loc.offset);
       ASSERT(r->m_state == RegInfo::CLEAN || r->m_state == RegInfo::DIRTY);

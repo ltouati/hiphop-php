@@ -67,7 +67,7 @@ AdminRequestHandler::AdminRequestHandler() {
 }
 
 // Helper machinery for jemalloc-stats-print command.
-#ifndef NO_JEMALLOC
+#ifdef USE_JEMALLOC
 struct malloc_write {
   char *s;
   size_t slen;
@@ -183,6 +183,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "    keysample     optional, only dump keys that belongs to the same\n"
         "                  group as <keysample>\n"
         "/const-ss:        get const_map_size\n"
+        "/static-strings:  get number of static strings\n"
         "/dump-apc:        dump all current value in APC to /tmp/apc_dump\n"
         "/dump-const:      dump all constant value in constant map to\n"
         "                  /tmp/const_map_dump\n"
@@ -215,7 +216,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "/vm-tcreset:      throw away translations and start over\n"
 #endif
       ;
-#ifndef NO_TCMALLOC
+#ifdef USE_TCMALLOC
         if (MallocExtensionInstance) {
           usage.append(
               "/free-mem:        ask tcmalloc to release memory to system\n"
@@ -225,7 +226,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         }
 #endif
 
-#ifndef NO_JEMALLOC
+#ifdef USE_JEMALLOC
         if (mallctl) {
           usage.append(
               "/jemalloc-stats:  get internal jemalloc stats\n"
@@ -325,6 +326,10 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         handleConstSizeRequest(cmd, transport)) {
       break;
     }
+    if (strcmp(cmd.c_str(), "static-strings") == 0 &&
+        handleStaticStringsRequest(cmd, transport)) {
+      break;
+    }
     if (strncmp(cmd.c_str(), "vm-", 3) == 0 &&
         handleVMRequest(cmd, transport)) {
       break;
@@ -337,7 +342,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
       break;
     }
 
-#ifndef NO_TCMALLOC
+#ifdef USE_TCMALLOC
     if (MallocExtensionInstance) {
       if (cmd == "free-mem") {
         MallocExtensionInstance()->ReleaseFreeMemory();
@@ -400,7 +405,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
     }
 #endif
 
-#ifndef NO_JEMALLOC
+#ifdef USE_JEMALLOC
     if (mallctl) {
       if (cmd == "free-mem") {
         // Purge all dirty unused pages.
@@ -910,6 +915,14 @@ bool AdminRequestHandler::handleConstSizeRequest (const std::string &cmd,
     return true;
   }
   return false;
+}
+
+bool AdminRequestHandler::handleStaticStringsRequest(const std::string& cmd,
+                                                     Transport* transport) {
+  std::ostringstream result;
+  result << StringData::GetStaticStringCount();
+  transport->sendString(result.str());
+  return true;
 }
 
 namespace {

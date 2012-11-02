@@ -43,6 +43,41 @@ using std::string;
  */
 namespace HPHP {
 namespace VM {
+
+/*
+ * Put this where the compiler has a chance to inline it.
+ */
+inline const Func* Class::wouldCall(const Func* prev) const {
+  if (LIKELY(m_methods.size() > prev->methodSlot())) {
+    const Func* cand = m_methods[prev->methodSlot()];
+    /* If this class has the same func at the same method slot
+       we're good to go. No need to recheck permissions,
+       since we already checked them first time around */
+    if (LIKELY(cand == prev)) return cand;
+    if (prev->attrs() & AttrPrivate) {
+      /* If the previously called function was private, then
+         the context class must be prev->cls() - so its
+         definitely accessible. So if this derives from
+         prev->cls() its the function that would be picked.
+         Note that we can only get here if there is a same
+         named function deeper in the class hierarchy */
+      if (this->classof(prev->cls())) return prev;
+    }
+    if (cand->name() == prev->name()) {
+      /*
+       * We have the same name - so its probably the right function.
+       * If its not public, check that both funcs were originally
+       * defined in the same base class.
+       */
+      if ((cand->attrs() & AttrPublic) ||
+          cand->baseCls() == prev->baseCls()) {
+        return cand;
+      }
+    }
+  }
+  return NULL;
+}
+
 namespace Transl {
 namespace TargetCache {
 
@@ -74,12 +109,12 @@ static const size_t kPreAllocatedBytes = kConditionFlagsOff + 64;
 
 // Mapping from names to targetcache locations. Protected by the translator
 // write lease.
-typedef hphp_hash_map<const StringData*, Handle, string_data_hash,
-        string_data_isame>
+typedef tbb::concurrent_hash_map<const StringData*, Handle,
+        StringDataHashICompare>
   HandleMapIS;
 
-typedef hphp_hash_map<const StringData*, Handle, string_data_hash,
-        string_data_same>
+typedef tbb::concurrent_hash_map<const StringData*, Handle,
+        StringDataHashCompare>
   HandleMapCS;
 
 // handleMaps[NSConstant]['FOO'] is the cache associated with the constant
@@ -127,12 +162,16 @@ public:
   HandleInfo<where >= FirstCaseSensitive>::getHandleMap(where)
 
 static size_t allocBitImpl(const StringData* name, PHPNameSpace ns) {
-  Lock l(s_handleMutex);
   ASSERT_NOT_IMPLEMENTED(ns == NSInvalid || ns >= FirstCaseSensitive);
   HandleMapCS& map = HandleInfo<true>::getHandleMap(ns);
-  Handle handle;
-  if (name != NULL && ns != NSInvalid && mapGet(map, name, &handle)) {
-    return handle;
+  HandleMapCS::const_accessor a;
+  if (name != NULL && ns != NSInvalid && map.find(a, name)) {
+    return a->second;
+  }
+  Lock l(s_handleMutex);
+  if (name != NULL && ns != NSInvalid && map.find(a, name)) {
+    // Retry under the lock.
+    return a->second;
   }
   if (!s_bits_to_go) {
     static const int kNumBytes = 512;
@@ -147,7 +186,8 @@ static size_t allocBitImpl(const StringData* name, PHPNameSpace ns) {
   s_bits_to_go--;
   if (name != NULL && ns != NSInvalid) {
     if (!name->isStatic()) name = StringData::GetStaticString(name);
-    mapInsertUnique(map, name, s_next_bit);
+    if (!map.insert(HandleMapCS::value_type(name, s_next_bit)))
+      NOT_REACHED();
   }
   return s_next_bit++;
 }
@@ -227,19 +267,23 @@ template<bool sensitive>
 Handle
 namedAlloc(PHPNameSpace where, const StringData* name,
            int numBytes, int align) {
-  Lock l(s_handleMutex);
   ASSERT(!name || (where >= 0 && where < NumNameSpaces));
-  Handle retval;
   typedef HandleInfo<sensitive> HI;
   typename HI::Map& map = HI::getHandleMap(where);
-  if (name && mapGet(map, name, &retval)) {
-    TRACE(2, "TargetCache: hit \"%s\", %d\n", name->data(), int(retval));
-    return retval;
+  typename HI::Map::const_accessor a;
+  if (name && map.find(a, name)) {
+    TRACE(2, "TargetCache: hit \"%s\", %d\n", name->data(), int(a->second));
+    return a->second;
   }
-  retval = allocLocked(where == NSPersistent, numBytes, align);
+  Lock l(s_handleMutex);
+  if (name && map.find(a, name)) { // Retry under the lock
+    TRACE(2, "TargetCache: hit \"%s\", %d\n", name->data(), int(a->second));
+    return a->second;
+  }
+  Handle retval = allocLocked(where == NSPersistent, numBytes, align);
   if (name) {
     if (!name->isStatic()) name = StringData::GetStaticString(name);
-    mapInsertUnique(map, name, retval);
+    if (!map.insert(typename HI::Map::value_type(name, retval))) NOT_REACHED();
     TRACE(1, "TargetCache: inserted \"%s\", %d\n", name->data(), int(retval));
   } else if (where == NSDynFunction) {
     funcCacheEntries.push_back(retval);
@@ -398,7 +442,7 @@ MethodCache::hashKey(const Class* c) {
 
 template<>
 HOT_FUNC_VM
-MethodCacheEntry
+void
 MethodCache::lookup(Handle handle, ActRec *ar, const void* extraKey) {
   StringData* name = (StringData*)extraKey;
   ASSERT(ar->hasThis());
@@ -409,10 +453,12 @@ MethodCache::lookup(Handle handle, ActRec *ar, const void* extraKey) {
   Pair* pair = thiz->keyToPair(c);
   const Func* func = NULL;
   bool isMagicCall = false;
+  bool isStatic = false;
   if (LIKELY(pair->m_key == c)) {
     func = pair->m_value.getFunc();
     ASSERT(func);
     isMagicCall = pair->m_value.isMagicCall();
+    isStatic = pair->m_value.isStatic();
     Stats::inc(Stats::TgtCache_MethodHit);
   } else {
     ASSERT(IMPLIES(pair->m_key, pair->m_value.getFunc()));
@@ -435,14 +481,15 @@ MethodCache::lookup(Handle handle, ActRec *ar, const void* extraKey) {
         }
       }
     }
-    pair->m_value.set(func, isMagicCall);
+    isStatic = func->attrs() & AttrStatic;
+    pair->m_value.set(func, isMagicCall, isStatic);
     pair->m_key = c;
   }
   ASSERT(func);
   func->validate();
 
   ar->m_func = func;
-  if (UNLIKELY(func->attrs() & AttrStatic)) {
+  if (UNLIKELY(isStatic)) {
     // Drop the ActRec's reference to the current instance
     if (obj->decRefCount() == 0) {
       obj->release();
@@ -456,7 +503,6 @@ MethodCache::lookup(Handle handle, ActRec *ar, const void* extraKey) {
     ar->setInvName(name);
     name->incRefCount();
   }
-  return pair->m_value;
 }
 
 //=============================================================================

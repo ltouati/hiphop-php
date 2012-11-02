@@ -1450,9 +1450,7 @@ void TranslatorX64::emitVGetElem(const Tracelet& t,
   PREP_RESULT(useTvR);
   typedef void (*OpFunc)(TypedValue*, TypedValue*, TypedValue*, MInstrState*);
   BUILD_OPTABH(getKeyTypeIS(memb), memb.isVariant());
-  if (ni.outLocal) {
-    m_regMap.cleanLoc(ni.outLocal->location);
-  }
+  cleanOutLocal(ni);
   EMIT_RCALL(a, ni, opFunc, R(rBase), ISML(memb), RESULT(useTvR), R(mis_rsp));
   invalidateOutLocal(ni);
   if (!useTvR) invalidateOutStack(ni);
@@ -1515,9 +1513,7 @@ void TranslatorX64::emitVGetProp(const Tracelet& t,
   typedef void (*OpFunc)(Class*, TypedValue*, TypedValue*, TypedValue*,
                          MInstrState*);
   BUILD_OPTABH(getKeyTypeS(memb), memb.isVariant(), m_vecState->isObj());
-  if (ni.outLocal) {
-    m_regMap.cleanLoc(ni.outLocal->location);
-  }
+  cleanOutLocal(ni);
   EMIT_RCALL(a, ni, opFunc,
              CTX(), R(*rBase), SML(memb), RESULT(useTvR), R(mis_rsp));
   invalidateOutLocal(ni);
@@ -1725,9 +1721,7 @@ void TranslatorX64::emitSetElem(const Tracelet& t,
   // Emit the appropriate helper call.
   typedef void (*OpFunc)(TypedValue*, TypedValue*, Cell*);
   BUILD_OPTABH(getKeyTypeIS(key), key.isVariant(), setResult);
-  if (ni.outLocal) {
-    m_regMap.cleanLoc(ni.outLocal->location);
-  }
+  cleanOutLocal(ni);
   EMIT_RCALL(a, ni, opFunc,
                     R(rBase),
                     ISML(key),
@@ -1817,9 +1811,7 @@ void TranslatorX64::emitSetProp(const Tracelet& t,
   PREP_VAL(useRVal, argNumToRegName[3]);
   // Emit the appropriate helper call.
   typedef void (*OpFunc)(Class*, TypedValue*, TypedValue*, Cell*);
-  if (ni.outLocal) {
-    m_regMap.cleanLoc(ni.outLocal->location);
-  }
+  cleanOutLocal(ni);
   BUILD_OPTAB(getKeyTypeS(key), key.isVariant(), setResult,
               m_vecState->isObj());
   EMIT_RCALL(a, ni, opFunc, CTX(), R(*rBase), SML(key), VAL(useRVal));
@@ -1890,6 +1882,7 @@ void TranslatorX64::emitSetOpElem(const Tracelet& t,
   BUILD_OPTAB_ARG(SETOP_OPS, getKeyTypeIS(key), key.isVariant(), op, setResult);
 # undef SETOP_OP
   // Emit the appropriate helper call.
+  cleanOutLocal(ni);
   if (setResult) {
     const DynLocation& result = *ni.outStack;
     bool useTvR = useTvResult(t, ni, mii);
@@ -1912,7 +1905,7 @@ void TranslatorX64::emitSetOpElem(const Tracelet& t,
                          VAL(useRVal)),
                       R(mis_rsp));
   }
-  ASSERT(!ni.outLocal);
+  invalidateOutLocal(ni);
 }
 #undef HELPER_TABLE
 
@@ -1988,9 +1981,7 @@ void TranslatorX64::emitSetOpProp(const Tracelet& t,
                   getKeyTypeS(key), key.isVariant(), op, setResult, isObj);
 # undef SETOP_OP
   // Emit the appropriate helper call.
-  if (ni.outLocal) {
-    m_regMap.cleanLoc(ni.outLocal->location);
-  }
+  cleanOutLocal(ni);
   if (setResult) {
     const DynLocation& result = *ni.outStack;
     bool useTvR = useTvResult(t, ni, mii);
@@ -2048,6 +2039,7 @@ void TranslatorX64::emitIncDecElem(const Tracelet& t,
   BUILD_OPTAB_ARG(INCDEC_OPS, getKeyTypeIS(key), key.isVariant(), op, setResult);
 # undef INCDEC_OP
   // Emit the appropriate helper call.
+  cleanOutLocal(ni);
   if (setResult) {
     const DynLocation& result = *ni.outStack;
     bool useTvR = useTvResult(t, ni, mii);
@@ -2057,7 +2049,7 @@ void TranslatorX64::emitIncDecElem(const Tracelet& t,
   } else {
     EMIT_RCALL(a, ni, opFunc, R(rBase), ISML(key), R(mis_rsp));
   }
-  ASSERT(!ni.outLocal);
+  invalidateOutLocal(ni);
 }
 #undef HELPER_TABLE
 
@@ -2104,6 +2096,7 @@ void TranslatorX64::emitIncDecProp(const Tracelet& t,
                   getKeyTypeS(key), key.isVariant(), op, setResult, isObj);
 # undef INCDEC_OP
   // Emit the appropriate helper call.
+  cleanOutLocal(ni);
   if (setResult) {
     const DynLocation& result = *ni.outStack;
     bool useTvR = useTvResult(t, ni, mii);
@@ -2119,7 +2112,7 @@ void TranslatorX64::emitIncDecProp(const Tracelet& t,
     EMIT_RCALL(a, ni, opFunc,
                CTX(), R(*rBase), SML(key), R(mis_rsp));
   }
-  ASSERT(!ni.outLocal);
+  invalidateOutLocal(ni);
 }
 #undef HELPER_TABLE
 
@@ -3104,58 +3097,6 @@ void TranslatorX64::translateCGetM_GE(const Tracelet& t,
   a.load_reg64_disp_reg64(rax, TVOFF(m_data), rax);
   emitArrayElem(i, &name /* XXX unused in emitArrayElem for GE */,
                 rax, &key, outLoc);
-}
-
-static bool
-isSupportedInstrVGetG(const NormalizedInstruction& i) {
-  ASSERT(i.inputs.size() == 1);
-  return (i.inputs[0]->rtt.isString());
-}
-
-void
-TranslatorX64::analyzeVGetG(Tracelet& t, NormalizedInstruction& i) {
-  i.m_txFlags = simplePlan(isSupportedInstrVGetG(i));
-}
-
-static TypedValue* lookupAddBoxedGlobal(StringData* name) {
-  VarEnv* ve = g_vmContext->m_globalVarEnv;
-  TypedValue* r = ve->lookupAdd(name);
-  if (r->m_type != KindOfRef) {
-    tvBox(r);
-  }
-  LITSTR_DECREF(name);
-  return r;
-}
-
-void
-TranslatorX64::translateVGetG(const Tracelet& t,
-                              const NormalizedInstruction& i) {
-  ASSERT(i.inputs.size() == 1);
-  ASSERT(i.outStack);
-  ASSERT(i.outStack->isVariant());
-  ASSERT(i.inputs[0]->location == i.outStack->location);
-
-  using namespace TargetCache;
-  const StringData* maybeName = i.inputs[0]->rtt.valueString();
-  if (!maybeName) {
-    EMIT_CALL(a, lookupAddBoxedGlobal, V(i.inputs[0]->location));
-    recordCall(i);
-  } else {
-    CacheHandle ch = BoxedGlobalCache::alloc(maybeName);
-
-    if (false) { // typecheck
-      StringData *key = NULL;
-      TypedValue UNUSED *glob = BoxedGlobalCache::lookupCreate(ch, key);
-    }
-    SKTRACE(1, i.source, "ch %d\n", ch);
-    EMIT_CALL(a, BoxedGlobalCache::lookupCreate,
-               IMM(ch),
-               V(i.inputs[0]->location));
-    recordCall(i);
-  }
-  m_regMap.bind(rax, i.outStack->location, KindOfRef, RegInfo::DIRTY);
-  emitIncRefGeneric(rax, 0);
-  emitDeref(a, rax, rax);
 }
 
 void
