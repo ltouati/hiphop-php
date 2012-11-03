@@ -21,7 +21,7 @@
 #include <runtime/base/util/request_local.h>
 
 #include <system/lib/systemlib.h>
-
+#include <util/logger.h>
 namespace HPHP {
 IMPLEMENT_DEFAULT_EXTENSION(SimpleXML);
 ///////////////////////////////////////////////////////////////////////////////
@@ -150,7 +150,7 @@ static Array create_children(CObjRef doc, xmlNodePtr root,
         continue;
       }
     } else {
-      if (node->type == XML_TEXT_NODE) {
+      if (node->type == XML_TEXT_NODE || node->type==XML_CDATA_SECTION_NODE) {
         if (node->content && *node->content) {
           add_property
             (properties, root,
@@ -158,6 +158,8 @@ static Array create_children(CObjRef doc, xmlNodePtr root,
                          ns, is_prefix, true));
         }
         continue;
+      } else {
+	Logger::Error("node :%d",node->type);
       }
     }
 
@@ -674,10 +676,14 @@ String c_SimpleXMLElement::t___tostring() {
         prop.toObject().getTyped<c_SimpleXMLElement>();
       if (elem->m_is_text && elem->m_free_text) {
         return prop.toString();
+      } else {
+	return "not_is_text";
       }
+    } else {
+      return "not_object";
     }
   }
-  return "";
+  return "no_iter";
 }
 
 Variant *c_SimpleXMLElement::___lval(Variant v_name) {
