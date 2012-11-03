@@ -79,17 +79,23 @@ private:
 class PDOPgSqlConnection : public PDOConnection
 {
 public:
-    PDOPgSqlConnection();
-    virtual ~PDOPgSqlConnection();
-    virtual bool create(CArrRef options);
-    int handleError(const char *codeString,int codeInt,const char *file, int line);
-    virtual bool preparer(CStrRef sql, sp_PDOStatement *stmt,
-                          CVarRef options);
-
-    virtual int64 doer(CStrRef sql);
-    PGconn *m_server;
-    string nextStatement();
-    int			m_statements;
+  PDOPgSqlConnection();
+  virtual ~PDOPgSqlConnection();
+  virtual bool create(CArrRef options);
+  int handleError(const char *codeString,int codeInt,const char *file, int line);
+  virtual bool preparer(CStrRef sql, sp_PDOStatement *stmt,
+			CVarRef options);
+  
+  virtual bool begin();
+  virtual bool commit();
+  virtual bool rollback();
+  
+  virtual int64 doer(CStrRef sql);
+  PGconn *m_server;
+  string nextStatement();
+  int			m_statements;
+private:
+  bool executeTransactionCommand(const char *cmd);
 };
 
 
@@ -291,6 +297,32 @@ bool PDOPgSqlStatement::support(SupportedMethod method)
     }
     return true;
 }
+
+  bool PDOPgSqlConnection::executeTransactionCommand(const char *cmd)
+  {
+    PGresult *res;
+    bool ret = true;
+    
+    res = PQexec(this->m_server, cmd);
+    
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+      handleError(pdo_pgsql_sqlstate(res),PQresultStatus(res),__FILE__,__LINE__);
+      ret = false;
+    }
+    
+    PQclear(res);
+    return ret;
+  }
+  bool PDOPgSqlConnection::begin() {
+    return this->executeTransactionCommand("BEGIN"); 
+  }
+  bool PDOPgSqlConnection::commit() {
+    return this->executeTransactionCommand("COMMIT"); 
+  }
+
+  bool PDOPgSqlConnection::rollback() {
+    return this->executeTransactionCommand("ROLLBACK"); 
+  }
 
 bool PDOPgSqlConnection::preparer(CStrRef sql, sp_PDOStatement *stmt,
                                   CVarRef options)
@@ -666,18 +698,12 @@ bool PDOPgSqlStatement::getColumn(int colno, Variant &value)
 
         switch(column->param_type)
         {
-
-        case PDO_PARAM_INT:
-            /***ptr = (char *) &(atol(ptr));
-            *len = sizeof(long);
-            break;
-            **/
+	case PDO_PARAM_INT:
+	  value = String(ptr,len,CopyString).toInt64();
+	  return true;
         case PDO_PARAM_BOOL:
-            /**         bool tmpVal = (*ptr == 't' ? 1: 0);
-                     *ptr = (char *) &(tmpVal);
-                     *len = sizeof(zend_bool);
-                     break;
-            **/
+	  value = Variant(ptr[0]=='t');
+	  return true;
         case PDO_PARAM_LOB:
             /**if (this->cols[colno].pgsql_type == OIDOID)
             {
@@ -717,11 +743,6 @@ bool PDOPgSqlStatement::getColumn(int colno, Variant &value)
                 }
             }
             break;**/
-        case PDO_PARAM_NULL:
-        case PDO_PARAM_STR:
-        case PDO_PARAM_STMT:
-        case PDO_PARAM_INPUT_OUTPUT:
-        case PDO_PARAM_ZVAL:
         default:
             break;
         }
