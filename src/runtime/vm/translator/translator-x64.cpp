@@ -2183,7 +2183,7 @@ TranslatorX64::emitPrologue(Func* func, int nPassed) {
   return funcBody;
 }
 
-void
+int32_t // returns the amount by which rVmSp should be adjusted
 TranslatorX64::emitBindCall(const Tracelet& t,
                             const NormalizedInstruction &ni,
                             Offset atCall, Offset afterCall) {
@@ -2205,7 +2205,7 @@ TranslatorX64::emitBindCall(const Tracelet& t,
   // Stash callee's rVmFp into rStashedAR for the callee's prologue
   a.    lea_reg64_disp_reg64(rVmSp, cellsToBytes(numArgs), rStashedAR);
   emitBindCallHelper(rStashedAR, ni.source, ni.funcd, numArgs, (bool)ni.funcd);
-  return;
+  return 0;
 }
 
 void
@@ -4304,6 +4304,18 @@ void TranslatorX64::fuseBranchAfterBool(const Tracelet& t,
   branchWithFlagsSet(t, nexti, cc);
 }
 
+/*
+ * Fusing "half" of a branch is useful in situations where you would
+ * otherwise emit a jcc to or over a fuseStaticBranch. Pass in the
+ * condition code and whether that CC means the branch is taken or
+ * not. For example, if %rax == 0 means that your branch is not taken
+ * (but %rax != 0 means you have to do more checks), do something like
+ * this:
+ *
+ * a.test_reg64_reg64(rax, rax);
+ * fuseHalfBranchAfterBool(t, i, CC_Z, false);
+ * // ...more comparisons
+ */
 void TranslatorX64::fuseHalfBranchAfterBool(const Tracelet& t,
                                             const NormalizedInstruction& i,
                                             ConditionCode cc,
@@ -4659,11 +4671,18 @@ TranslatorX64::translateAssignToLocalOp(const Tracelet& t,
 
 static void
 planPop(NormalizedInstruction& i) {
+  DataType type = i.inputs[0]->outerType();
+  // Avoid type-prediction guard simply for popping the value out of the stack.
   if (i.prev && i.prev->outputPredicted) {
     i.prev->outputPredicted = false;
-    i.inputs[0]->rtt = RuntimeType(KindOfInvalid);
+    // If the prediction is based on static analysis, the type is either 'type'
+    // or null. So if 'type' is not ref-counted, keeping it avoids the dynamic
+    // check for decref.
+    if (!(i.prev->outputPredictionStatic) || IS_REFCOUNTED_TYPE(type)) {
+      i.inputs[0]->rtt = RuntimeType(KindOfInvalid);
+      type = KindOfInvalid;
+    }
   }
-  DataType type = i.inputs[0]->outerType();
   i.m_txFlags =
     (type == KindOfInvalid || IS_REFCOUNTED_TYPE(type)) ? Supported : Native;
   i.manuallyAllocInputs = true;
@@ -6222,9 +6241,13 @@ TranslatorX64::translateRetV(const Tracelet& t,
  * only opcode in a function body, and also functions as the return.
  *
  * This function runs between tracelets and does not use m_regMap.
+ *
+ * if emitSavedRIPReturn is false, it returns the amount by which
+ * rVmSp should be adjusted, otherwise, it emits code to perform
+ * the adjustment (this allows us to combine updates to rVmSp)
  */
-void TranslatorX64::emitNativeImpl(const Func* func,
-                                   bool emitSavedRIPReturn) {
+int32_t TranslatorX64::emitNativeImpl(const Func* func,
+                                      bool emitSavedRIPReturn) {
   BuiltinFunction builtinFuncPtr = func->builtinFuncPtr();
   if (false) { // typecheck
     ActRec* ar = NULL;
@@ -6281,14 +6304,18 @@ void TranslatorX64::emitNativeImpl(const Func* func,
    * reg-to-reg move.
    */
   int nLocalCells = func->numSlotsInFrame();
-  a.   add_imm64_reg64(sizeof(ActRec) + cellsToBytes(nLocalCells-1), rVmSp);
+  if (emitSavedRIPReturn) {
+    a.   add_imm64_reg64(sizeof(ActRec) + cellsToBytes(nLocalCells-1), rVmSp);
+  }
   a.   load_reg64_disp_reg64(rVmFp, AROFF(m_savedRbp), rVmFp);
 
   emitRB(a, RBTypeFuncExit, func->fullName()->data(), saveDuringEmitRB);
   if (emitSavedRIPReturn) {
     a.   jmp_reg        (*rRetAddr);
     translator_not_reached(a);
+    return 0;
   }
+  return sizeof(ActRec) + cellsToBytes(nLocalCells-1);
 }
 
 void
@@ -6794,8 +6821,8 @@ void TranslatorX64::translateContEnter(const Tracelet& t,
   // Frame linkage.
   int32_t returnOffset = nextSrcKey(t, i).offset() - curFunc()->base();
   a.    store_imm32_disp_reg(returnOffset, AROFF(m_soff), *rScratch);
-  MovImmPatcher retIP(a, (uint64_t)a.code.frontier, *rRetIP);
-  a.    store_reg64_disp_reg64(*rRetIP, AROFF(m_savedRip), *rScratch);
+  StoreImmPatcher retIP(a, (uint64_t)a.code.frontier, *rRetIP,
+                        AROFF(m_savedRip), *rScratch);
   a.    store_reg64_disp_reg64(rVmFp, AROFF(m_savedRbp), *rScratch);
 
   a.    mov_reg64_reg64(*rScratch, rVmFp);
@@ -6943,6 +6970,71 @@ void TranslatorX64::translateContHandle(const Tracelet& t,
                                         const NormalizedInstruction& i) {
   // Always interpreted
   not_reached();
+}
+
+void TranslatorX64::analyzeStrlen(Tracelet& t,
+                                  NormalizedInstruction& i) {
+  switch (i.inputs[0]->rtt.valueType()) {
+    NULLCASE() :
+    case KindOfBoolean:
+      i.m_txFlags = Native;
+      break;
+    STRINGCASE() :
+      // May have to destroy a StringData, but can't reenter
+      i.m_txFlags = Simple;
+      break;
+    case KindOfArray:
+      i.m_txFlags = Supported;
+      break;
+    case KindOfInt64:
+    case KindOfDouble:
+    case KindOfObject:
+      i.m_txFlags = Interp;
+      break;
+    default:
+      not_reached();
+  }
+}
+
+void TranslatorX64::translateStrlen(const Tracelet& t,
+                                    const NormalizedInstruction& i) {
+  PhysReg rInput = getReg(i.inputs[0]->location);
+  DataType inType = i.inputs[0]->rtt.valueType();
+
+  switch (inType) {
+    NULLCASE(): {
+      m_regMap.allocOutputRegs(i);
+      PhysReg rOutput = getReg(i.outStack->location);
+      a.  xor_reg64_reg64(rOutput, rOutput);
+      break;
+    }
+    case KindOfBoolean:
+      m_regMap.allocOutputRegs(i);
+      // Nothing. strlen(true) == 1, strlen(false) == 0
+      break;
+    STRINGCASE(): {
+      ScratchReg rScratch(m_regMap);
+      a.  load_reg64_disp_reg32(rInput, StringData::sizeOffset(), *rScratch);
+      emitDecRef(a, i, rInput, inType);
+      m_regMap.bindScratch(rScratch, i.outStack->location, KindOfInt64,
+                           RegInfo::DIRTY);
+      ASSERT(m_regMap.regIsFree(rInput));
+      break;
+    }
+    case KindOfArray: {
+      m_regMap.allocOutputRegs(i);
+      PhysReg rOutput = getReg(i.outStack->location);
+      emitDecRef(a, i, rInput, KindOfArray);
+      // You think I am kidding about this, but I am not. This is PHP.
+      a.  mov_imm32_reg32(strlen("Array"), rOutput);
+      break;
+    }
+    case KindOfInt64:
+    case KindOfDouble:
+    case KindOfObject:
+    default:
+      not_reached();
+  }
 }
 
 static void analyzeClassExistsImpl(NormalizedInstruction& i) {
@@ -8955,12 +9047,10 @@ TranslatorX64::translateFCall(const Tracelet& t,
   // Caller-specific fields: return addresses and the frame pointer
   // offset.
   ASSERT(sizeof(Cell) == 1 << 4);
-  // Record the hardware return address. This will be patched up below; 2
-  // is a magic number dependent on assembler implementation.
-  MovImmPatcher retIP(a, (uint64_t)a.code.frontier, *retIPReg);
-  a.    store_reg64_disp_reg64 (*retIPReg,
-                                cellsToBytes(numArgs) + AROFF(m_savedRip),
-                                rVmSp);
+
+  // Store the to-be-patched later return address
+  StoreImmPatcher retIP(a, (uint64_t)a.code.frontier, *retIPReg,
+                        cellsToBytes(numArgs) + AROFF(m_savedRip), rVmSp);
 
   // The kooky offset here a) gets us to the current ActRec,
   // and b) accesses m_soff.
@@ -8969,12 +9059,15 @@ TranslatorX64::translateFCall(const Tracelet& t,
                              cellsToBytes(numArgs) + AROFF(m_soff),
                              rVmSp);
 
-  emitBindCall(t, i,
-               curUnit()->offsetOf(atCall),
-               curUnit()->offsetOf(after)); // ...
+  int32_t adjust = emitBindCall(t, i,
+                                curUnit()->offsetOf(atCall),
+                                curUnit()->offsetOf(after));
   retIP.patch(uint64(a.code.frontier));
 
   if (i.breaksTracelet) {
+    if (adjust) {
+      a.    add_imm64_reg64(adjust, rVmSp);
+    }
     SrcKey fallThru(curFunc(), after);
     emitBindJmp(fallThru);
   } else {
@@ -8987,10 +9080,10 @@ TranslatorX64::translateFCall(const Tracelet& t,
      * TODO: in the case of an inlined NativeImpl, we're essentially
      * emitting two adds to rVmSp in a row, which we can combine ...
      */
-    int delta = i.stackOff + getStackDelta(i);
+    int delta = cellsToBytes(i.stackOff + getStackDelta(i)) + adjust;
     if (delta != 0) {
       // i.stackOff is in negative Cells, not bytes.
-      a.    add_imm64_reg64(cellsToBytes(delta), rVmSp);
+      a.    add_imm64_reg64(delta, rVmSp);
     }
   }
 }

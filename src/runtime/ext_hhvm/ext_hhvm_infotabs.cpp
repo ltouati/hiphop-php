@@ -1680,7 +1680,6 @@ TypedValue* fg_ob_implicit_flush(VM::ActRec *ar);
 TypedValue* fg_ob_list_handlers(VM::ActRec *ar);
 TypedValue* fg_output_add_rewrite_var(VM::ActRec *ar);
 TypedValue* fg_output_reset_rewrite_vars(VM::ActRec *ar);
-TypedValue* fg_hphp_log(VM::ActRec *ar);
 TypedValue* fg_hphp_crash_log(VM::ActRec *ar);
 TypedValue* fg_hphp_stats(VM::ActRec *ar);
 TypedValue* fg_hphp_get_stats(VM::ActRec *ar);
@@ -2072,6 +2071,7 @@ TypedValue* fg_hphp_get_thread_id(VM::ActRec *ar);
 TypedValue* fg_hphp_gettid(VM::ActRec *ar);
 TypedValue* fg_thrift_protocol_write_binary(VM::ActRec *ar);
 TypedValue* fg_thrift_protocol_read_binary(VM::ActRec *ar);
+TypedValue* fg_thrift_protocol_set_compact_version(VM::ActRec *ar);
 TypedValue* fg_thrift_protocol_write_compact(VM::ActRec *ar);
 TypedValue* fg_thrift_protocol_read_compact(VM::ActRec *ar);
 TypedValue* fg_base64_decode(VM::ActRec *ar);
@@ -4574,7 +4574,6 @@ const HhbcExtFuncInfo hhbc_ext_funcs[] = {
   { "ob_list_handlers", fg_ob_list_handlers },
   { "output_add_rewrite_var", fg_output_add_rewrite_var },
   { "output_reset_rewrite_vars", fg_output_reset_rewrite_vars },
-  { "hphp_log", fg_hphp_log },
   { "hphp_crash_log", fg_hphp_crash_log },
   { "hphp_stats", fg_hphp_stats },
   { "hphp_get_stats", fg_hphp_get_stats },
@@ -4966,6 +4965,7 @@ const HhbcExtFuncInfo hhbc_ext_funcs[] = {
   { "hphp_gettid", fg_hphp_gettid },
   { "thrift_protocol_write_binary", fg_thrift_protocol_write_binary },
   { "thrift_protocol_read_binary", fg_thrift_protocol_read_binary },
+  { "thrift_protocol_set_compact_version", fg_thrift_protocol_set_compact_version },
   { "thrift_protocol_write_compact", fg_thrift_protocol_write_compact },
   { "thrift_protocol_read_compact", fg_thrift_protocol_read_compact },
   { "base64_decode", fg_base64_decode },
