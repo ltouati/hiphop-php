@@ -78,6 +78,10 @@ void ClassStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr fs) {
   }
   if (m_base) m_base->getOriginalStrings(bases);
 
+  for (auto &b : bases) {
+    ar->parseOnDemandByClass(Util::toLower(b));
+  }
+
   vector<UserAttributePtr> attrs;
   if (m_attrList) {
     for (int i = 0; i < m_attrList->getCount(); ++i) {
@@ -194,7 +198,7 @@ void ClassStatement::analyzeProgram(AnalysisResultPtr ar) {
           (cls->isTrait())) {
         Compiler::Error(Compiler::InvalidDerivation,
                         shared_from_this(),
-                        "You are extending " + cls->getOriginalName() + 
+                        "You are extending " + cls->getOriginalName() +
                           " which is an interface or a trait");
       }
       if (cls->isUserClass()) {
@@ -436,7 +440,7 @@ void ClassStatement::outputCPPImpl(CodeGenerator &cg, AnalysisResultPtr ar) {
         bool redec = classScope->isRedeclaring();
 
         if (!parCls && !m_parent.empty()) {
-          assert(dyn);
+          always_assert(dyn);
         }
 
         if (!classScope->derivesFromRedeclaring()) {
@@ -727,7 +731,7 @@ void ClassStatement::outputCPPImpl(CodeGenerator &cg, AnalysisResultPtr ar) {
             else {
               cgCls.printf(", ");
             }
-            cgCls.printf(intfClassScope->getOriginalName().c_str());
+            cgCls.print(intfClassScope->getOriginalName().c_str());
           }
         }
       }
@@ -739,7 +743,7 @@ void ClassStatement::outputCPPImpl(CodeGenerator &cg, AnalysisResultPtr ar) {
                    getOriginalName().c_str());
 
       FunctionScopePtr cons = classScope->findConstructor(ar, true);
-      if (cons && !cons->isAbstract() || m_type != T_ABSTRACT) {
+      if ((cons && !cons->isAbstract()) || m_type != T_ABSTRACT) {
         // if not an abstract class and not having an explicit constructor,
         // adds a default constructor
         outputJavaFFIConstructor(cgCls, ar, cons);
@@ -758,7 +762,7 @@ void ClassStatement::outputCPPImpl(CodeGenerator &cg, AnalysisResultPtr ar) {
 
       if (m_stmt) m_stmt->outputCPP(cg, ar);
       FunctionScopePtr cons = classScope->findConstructor(ar, true);
-      if (cons && !cons->isAbstract() || m_type != T_ABSTRACT) {
+      if ((cons && !cons->isAbstract()) || m_type != T_ABSTRACT) {
         outputJavaFFICPPCreator(cg, ar, cons);
       }
     }

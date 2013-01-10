@@ -42,6 +42,8 @@ class c_Vector : public ExtObjectDataFlags<ObjectData::VectorAttrInit|
   friend class c_StableMap;
   friend class ArrayIter;
 
+  enum SortFlavor { IntegerSort, StringSort, GenericSort };
+
   public: c_Vector(const ObjectStaticCallbacks *cb = &cw_Vector);
   public: ~c_Vector();
   public: void freeData();
@@ -137,9 +139,7 @@ class c_Vector : public ExtObjectDataFlags<ObjectData::VectorAttrInit|
       throw e;
       return;
     }
-    if (IS_REFCOUNTED_TYPE(val->m_type)) {
-      TV_INCREF(val);
-    }
+    tvRefcountedIncRef(val);
     TypedValue* tv = &m_data[key];
     tvRefcountedDecRef(tv);
     tv->m_data.num = val->m_data.num;
@@ -151,9 +151,7 @@ class c_Vector : public ExtObjectDataFlags<ObjectData::VectorAttrInit|
     if (m_capacity <= m_size) {
       grow();
     }
-    if (IS_REFCOUNTED_TYPE(val->m_type)) {
-      TV_INCREF(val);
-    }
+    tvRefcountedIncRef(val);
     TypedValue* tv = &m_data[m_size];
     tv->m_data.num = val->m_data.num;
     tv->m_type = val->m_type;
@@ -173,6 +171,13 @@ class c_Vector : public ExtObjectDataFlags<ObjectData::VectorAttrInit|
 
   public: Array o_toArray() const;
   public: ObjectData* clone();
+
+  private:
+  template <typename AccessorT>
+  SortFlavor preSort(const AccessorT& acc);
+
+  public: void sort(int sort_flags, bool ascending);
+  public: void usort(CVarRef cmp_function);
 
   public: static TypedValue* OffsetGet(ObjectData* obj, TypedValue* key);
   public: static void OffsetSet(ObjectData* obj, TypedValue* key,
@@ -316,24 +321,24 @@ class c_Map : public ExtObjectDataFlags<ObjectData::MapAttrInit|
 
   public: TypedValue* at(int64 key) {
     Bucket* p = find(key);
-    if (LIKELY(p != NULL)) return (TypedValue*)&p->data;
+    if (LIKELY(p != NULL)) return &p->data;
     throwOOB();
     return NULL;
   }
   public: TypedValue* get(int64 key) {
     Bucket* p = find(key);
-    if (p) return (TypedValue*)&p->data;
+    if (p) return &p->data;
     return NULL;
   }
   public: TypedValue* at(StringData* key) {
     Bucket* p = find(key->data(), key->size(), key->hash());
-    if (LIKELY(p != NULL)) return (TypedValue*)&p->data;
+    if (LIKELY(p != NULL)) return &p->data;
     throwOOB();
     return NULL;
   }
   public: TypedValue* get(StringData* key) {
     Bucket* p = find(key->data(), key->size(), key->hash());
-    if (p) return (TypedValue*)&p->data;
+    if (p) return &p->data;
     return NULL;
   }
   public: void put(int64 key, TypedValue* val) {
@@ -565,6 +570,8 @@ class c_StableMap : public ExtObjectDataFlags<ObjectData::StableMapAttrInit|
   friend class c_Map;
   friend class ArrayIter;
 
+  enum SortFlavor { IntegerSort, StringSort, GenericSort };
+
   public: c_StableMap(const ObjectStaticCallbacks *cb = &cw_StableMap);
   public: ~c_StableMap();
   public: void freeData();
@@ -631,7 +638,7 @@ class c_StableMap : public ExtObjectDataFlags<ObjectData::StableMapAttrInit|
 
   public: TypedValue* at(int64 key) {
     Bucket* p = find(key);
-    if (LIKELY(p != NULL)) return (TypedValue*)&p->data;
+    if (LIKELY(p != NULL)) return &p->data;
     Object e(SystemLib::AllocOutOfBoundsExceptionObject(
       "Attempted to subscript a non-key"));
     throw e;
@@ -639,7 +646,7 @@ class c_StableMap : public ExtObjectDataFlags<ObjectData::StableMapAttrInit|
   }
   public: TypedValue* at(StringData* key) {
     Bucket* p = find(key->data(), key->size(), key->hash());
-    if (LIKELY(p != NULL)) return (TypedValue*)&p->data;
+    if (LIKELY(p != NULL)) return &p->data;
     Object e(SystemLib::AllocOutOfBoundsExceptionObject(
       "Attempted to subscript a non-key"));
     throw e;
@@ -647,19 +654,19 @@ class c_StableMap : public ExtObjectDataFlags<ObjectData::StableMapAttrInit|
   }
   public: TypedValue* get(int64 key) {
     Bucket* p = find(key);
-    if (p != NULL) return (TypedValue*)&p->data;
+    if (p != NULL) return &p->data;
     return NULL;
   }
   public: TypedValue* get(StringData* key) {
     Bucket* p = find(key->data(), key->size(), key->hash());
-    if (p != NULL) return (TypedValue*)&p->data;
+    if (p != NULL) return &p->data;
     return NULL;
   }
   public: void put(int64 key, TypedValue* val) {
-    update(key, tvAsCVarRef(val));
+    update(key, val);
   }
   public: void put(StringData* key, TypedValue* val) {
-    update(key, tvAsCVarRef(val));
+    update(key, val);
   }
   public: void remove(int64 key) {
     ++m_versionNumber;
@@ -699,16 +706,12 @@ class c_StableMap : public ExtObjectDataFlags<ObjectData::StableMapAttrInit|
 public:
   class Bucket {
   public:
-    Bucket() :
-      ikey(0), pListNext(NULL), pListLast(NULL), pNext(NULL) {
+    Bucket() : ikey(0), pListNext(NULL), pListLast(NULL), pNext(NULL) {
       data._count = 0;
     }
-    Bucket(Variant::NoInit d) :
-      data(d), ikey(0), pListNext(NULL), pListLast(NULL), pNext(NULL) {
-      data._count = 0;
-    }
-    Bucket(CVarRef d) :
-      data(d), ikey(0), pListNext(NULL), pListLast(NULL), pNext(NULL) {
+    Bucket(TypedValue* tv) : ikey(0), pListNext(NULL), pListLast(NULL),
+        pNext(NULL) {
+      tvDup(tv, &data);
       data._count = 0;
     }
     ~Bucket();
@@ -723,7 +726,7 @@ public:
      * int, nonzero values contain 31 bits of a string's hashcode.
      * It is critical that when we return &data to clients, that they not
      * read or write the _count field! */
-    Variant data;
+    TypedValue data;
     union {
       int64 ikey;
       StringData* skey;
@@ -757,6 +760,17 @@ public:
     void dump();
   };
 
+  private:
+  template <typename AccessorT>
+  SortFlavor preSort(Bucket** buffer, const AccessorT& acc, bool checkTypes);
+
+  private: void postSort(Bucket** buffer);
+
+  public: void asort(int sort_flags, bool ascending);
+  public: void ksort(int sort_flags, bool ascending);
+  public: void uasort(CVarRef cmp_function);
+  public: void uksort(CVarRef cmp_function);
+
 private:
   uint             m_size;
   uint             m_nTableSize;
@@ -771,8 +785,8 @@ private:
   Bucket** findForErase(int64 h) const;
   Bucket** findForErase(const char* k, int len, strhash_t prehash) const;
 
-  bool update(int64 h, CVarRef data);
-  bool update(StringData* key, CVarRef data);
+  bool update(int64 h, TypedValue* data);
+  bool update(StringData* key, TypedValue* data);
   void erase(Bucket** prev);
 
   void resize();
@@ -1173,6 +1187,73 @@ void collectionUnserialize(ObjectData* obj,
                            VariableUnserializer* uns,
                            int64 sz,
                            char type);
+
+class CollectionInit {
+public:
+  CollectionInit(int cType, ssize_t nElems);
+  ~CollectionInit() {
+    // In case an exception interrupts the initialization.
+    if (m_data) m_data->release();
+  }
+  CollectionInit &set(CVarRef v) {
+    collectionOffsetAppend(m_data, v);
+    return *this;
+  }
+  CollectionInit &set(RefResult v) {
+    collectionOffsetAppend(m_data, variant(v));
+    return *this;
+  }
+  CollectionInit &set(CVarWithRefBind v) {
+    collectionOffsetAppend(m_data, variant(v));
+    return *this;
+  }
+  CollectionInit &set(int64 name, CVarRef v) {
+    collectionOffsetSet(m_data, name, v);
+    return *this;
+  }
+  CollectionInit &set(litstr name, CVarRef v) {
+    collectionOffsetSet(m_data, name, v);
+    return *this;
+  }
+  CollectionInit &set(CStrRef name, CVarRef v) {
+    collectionOffsetSet(m_data, name, v);
+    return *this;
+  }
+  CollectionInit &set(CVarRef name, CVarRef v) {
+    collectionOffsetSet(m_data, name, v);
+    return *this;
+  }
+  template<typename T>
+  CollectionInit &set(const T &name, CVarRef v) {
+    collectionOffsetSet(m_data, name, variant(v));
+    return *this;
+  }
+  CollectionInit &set(litstr name, RefResult v) {
+    collectionOffsetSet(m_data, name, variant(v));
+    return *this;
+  }
+  CollectionInit &set(CStrRef name, RefResult v) {
+    collectionOffsetSet(m_data, name, variant(v));
+    return *this;
+  }
+  CollectionInit &set(CVarRef name, RefResult v) {
+    collectionOffsetSet(m_data, name, variant(v));
+    return *this;
+  }
+  template<typename T>
+  CollectionInit &set(const T &name, RefResult v) {
+    collectionOffsetSet(m_data, name, variant(v));
+    return *this;
+  }
+  ObjectData *create() {
+    ObjectData *ret = m_data;
+    m_data = NULL;
+    return ret;
+  }
+  operator ObjectData *() { return create(); }
+private:
+  ObjectData *m_data;
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 }

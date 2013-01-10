@@ -116,7 +116,7 @@ void ZendArray::init(uint nSize) {
 
 HOT_FUNC_HPHP
 ZendArray::ZendArray(uint nSize, bool nonsmart) :
-  m_nonsmart(nonsmart), m_pListHead(NULL), m_pListTail(NULL),
+  ArrayData(kArrayData, nonsmart), m_pListHead(NULL), m_pListTail(NULL),
   m_nNextFreeElement(0) {
   m_size = 0;
   init(nSize);
@@ -124,8 +124,7 @@ ZendArray::ZendArray(uint nSize, bool nonsmart) :
 
 HOT_FUNC_HPHP
 ZendArray::ZendArray(uint nSize, int64 n, Bucket *bkts[]) :
-  m_nonsmart(false), m_pListHead(bkts[0]), m_pListTail(0),
-  m_nNextFreeElement(n) {
+  m_pListHead(bkts[0]), m_pListTail(0), m_nNextFreeElement(n) {
   m_pos = (ssize_t)(m_pListHead);
   m_size = nSize;
   init(nSize);
@@ -312,9 +311,9 @@ static bool hit_string_key(const ZendArray::Bucket *p, const char *k, int len,
                            int32_t hash) {
   if (!p->hasStrKey()) return false;
   const char *data = p->skey->data();
-  return data == k || p->hash() == hash
-                      && p->skey->size() == len &&
-                      memcmp(data, k, len) == 0;
+  return data == k || (p->hash() == hash &&
+                       p->skey->size() == len &&
+                       memcmp(data, k, len) == 0);
 }
 
 ZendArray::Bucket *ZendArray::find(int64 h) const {

@@ -26,15 +26,6 @@
 
 #include "runtime/ext/bcmath/bcmath.h" // for MAX(a,b)
 
-// We want to use the TypedValue macros inside this header file, but we don't
-// want to pollute the environment of files that include this header file.
-// Thus, we record whether they were already defined here. That way, we know
-// whether we need to undefine the macros at the end of this header file.
-#ifndef __HPHP_TV_MACROS__
-#include "runtime/base/tv_macros.h"
-#define __VM_BYTECODE_H_SHOULD_UNDEF_TV__
-#endif
-
 #include "runtime/vm/core_types.h"
 #include "runtime/vm/class.h"
 #include "runtime/vm/instance.h"
@@ -45,12 +36,6 @@
 namespace HPHP {
 
 namespace VM {
-
-#define LITSTR_DECREF(s) do {                                                 \
-  if ((s)->decRefCount() == 0) {                                              \
-    (s)->release();                                                           \
-  }                                                                           \
-} while (0)
 
 // SETOP_BODY() would ideally be an inline function, but the header
 // dependencies for concat_assign() make this unfeasible.
@@ -75,6 +60,10 @@ namespace VM {
 } while (0)
 
 class Func;
+
+// max number of arguments for direct call to builtin
+static const int kMaxBuiltinArgs = 5;
+
 
 struct ExtraArgs : private boost::noncopyable {
   /*
@@ -271,6 +260,9 @@ struct ActRec {
     };
   };
 
+  // skip this frame if it is for a builtin function
+  bool skipFrame() const;
+
   /**
    * Accessors for the packed m_numArgsAndCtorFlag field. We track
    * whether ActRecs came from FPushCtor* so that during unwinding we
@@ -367,7 +359,11 @@ struct ActRec {
     field3 = (type3)(intptr_t(val) | 2LL); \
   }
 
+  // Note that reordering these is likely to require changes to the
+  // translator.
   UNION_FIELD_ACCESSORS2(This, ObjectData*, m_this, Class, Class*, m_cls)
+  static const int8_t kInvNameBit   = 0x1;
+  static const int8_t kExtraArgsBit = 0x2;
   UNION_FIELD_ACCESSORS3(VarEnv, VarEnv*, m_varEnv, InvName, StringData*,
                          m_invName, ExtraArgs, ExtraArgs*, m_extraArgs)
 
@@ -479,7 +475,6 @@ public:
   void unprotect();
   void requestInit();
   void requestExit();
-  static void flush();
 private:
   void toStringFrag(std::ostream& os, const ActRec* fp,
                     const TypedValue* top) const;
@@ -575,18 +570,8 @@ public:
   inline void ALWAYS_INLINE popAR() {
     ASSERT(m_top != m_base);
     ActRec* ar = (ActRec*)m_top;
-    if (ar->hasThis()) {
-      ObjectData* this_ = ar->getThis();
-      if (this_->decRefCount() == 0) {
-        this_->release();
-      }
-    }
-    if (ar->hasInvName()) {
-      StringData* invName = ar->getInvName();
-      if (invName->decRefCount() == 0) {
-        invName->release();
-      }
-    }
+    if (ar->hasThis()) decRefObj(ar->getThis());
+    if (ar->hasInvName()) decRefStr(ar->getInvName());
 
     // This should only be used on a pre-live ActRec.
     ASSERT(!ar->hasVarEnv());
@@ -626,7 +611,7 @@ public:
     Cell* fr = (Cell*)m_top;
     m_top--;
     Cell* to = (Cell*)m_top;
-    TV_DUP_CELL(fr, to);
+    tvDupCell(fr, to);
   }
 
   inline void ALWAYS_INLINE box() {
@@ -637,20 +622,27 @@ public:
 
   inline void ALWAYS_INLINE unbox() {
     ASSERT(m_top != m_base);
-    ASSERT(m_top->m_type == KindOfRef);
-    TV_UNBOX(m_top);
+    tvUnbox(m_top);
   }
 
   inline void ALWAYS_INLINE pushUninit() {
     ASSERT(m_top != m_elms);
     m_top--;
-    TV_WRITE_UNINIT(m_top);
+    tvWriteUninit(m_top);
   }
 
   inline void ALWAYS_INLINE pushNull() {
     ASSERT(m_top != m_elms);
     m_top--;
-    TV_WRITE_NULL(m_top);
+    tvWriteNull(m_top);
+  }
+
+  inline void ALWAYS_INLINE pushNullUninit() {
+    ASSERT(m_top != m_elms);
+    m_top--;
+    m_top->m_data.num = 0;
+    m_top->_count = 0;
+    m_top->m_type = KindOfUninit;
   }
 
   #define PUSH_METHOD(name, type, field, value)                               \
@@ -795,11 +787,5 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 }
 }
-
-// Undefine the TypedValue macros if appropriate
-#ifdef __VM_BYTECODE_H_SHOULD_UNDEF_TV__
-#undef __VM_BYTECODE_H_SHOULD_UNDEF_TV__
-#include <runtime/base/undef_tv_macros.h>
-#endif
 
 #endif // __VM_BYTECODE_H__

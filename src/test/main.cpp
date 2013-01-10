@@ -21,14 +21,33 @@
 
 using namespace HPHP;
 
+namespace HPHP {
+  extern void (*g_vmProcessInit)();
+  namespace VM { extern void ProcessInit(); }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
+extern "C" void compiler_hook_initialize();
+
 int main(int argc, char **argv) {
+#ifdef HHVM
+  HPHP::g_vmProcessInit = &HPHP::VM::ProcessInit;
+#endif
+
+#ifdef HHVM_FBMAKE
+  // In an fbmake build, override the locations of hphp and hhvm that
+  // dirs.mk will think we're using.  (This is used in test.mk when
+  // building/running tests.)
+  setenv("TEST_OVERRIDE_HHVM", "_bin/src/hhvm/hhvm", true);
+  setenv("TEST_OVERRIDE_HPHP", "_bin/src/hphp/hphp", true);
+#endif
+
+#ifdef FACEBOOK
+  compiler_hook_initialize();
+#endif
+
   std::string suite, which, set;
-  void (*compiler_hook_initialize)();
-  compiler_hook_initialize =
-    (void (*)())dlsym(NULL, "compiler_hook_initialize");
-  if (compiler_hook_initialize) compiler_hook_initialize();
   if (argc >= 2) suite = argv[1];
   if (argc >= 3) which = argv[2];
   if (argc >= 4) set   = argv[3];

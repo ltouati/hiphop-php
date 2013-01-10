@@ -237,9 +237,7 @@ Variant f_fgetss(CObjRef handle, int64 length /* = 0 */,
 
 Variant f_fscanf(int _argc, CObjRef handle, CStrRef format, CArrRef _argv /* = null_array */) {
   CHECK_HANDLE(handle, f);
-  StringBuffer str;
-  str.read(f);
-  return f_sscanf(_argc, str.detach(), format, _argv);
+  return f_sscanf(_argc, f->readLine(), format, _argv);
 }
 
 Variant f_fpassthru(CObjRef handle) {
@@ -495,7 +493,7 @@ Variant f_parse_ini_file(CStrRef filename, bool process_sections /* = false */,
   if (translated.empty() || !f_file_exists(translated)) {
     if (filename[0] != '/') {
       String cfd = hhvm
-                   ? g_vmContext->getContainingFileName(true)
+                   ? g_vmContext->getContainingFileName()
                    : FrameInjection::GetContainingFileName(true);
       if (!cfd.empty()) {
         int npos = cfd.rfind('/');

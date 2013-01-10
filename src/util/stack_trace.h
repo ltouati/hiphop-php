@@ -42,21 +42,6 @@ public:
 
 public:
   static bool Enabled;
-  static std::string ReportDirectory;
-  static std::string ReportEmail;
-
-  /**
-   * Attaches the handler to a bunch of normally fatal signals (SEGV, BUS,
-   * ABRT, etc).a
-   */
-  static void InstallReportOnErrors();
-
-  /**
-   * Asking for a backtrace-on-signal will log the trace to stderr and
-   * then terminate the program if that signal is caught. Use this to attach to
-   * a specific signal.
-   */
-  static void InstallReportOnSignal(int signal);
 
 protected:
   StackTraceBase();
@@ -160,7 +145,8 @@ public:
    * also store translated stack trace into the variable.
    * Returns the name of the generated file.
    */
-  void log(const char *errorType, const char * fname, const char *pid) const;
+  void log(const char *errorType, const char * fname, const char *pid,
+           const char *buildId) const;
 
   /**
    * Add extra information to log together with a crash stacktrace log.

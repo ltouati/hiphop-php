@@ -29,7 +29,6 @@ class ArrayInit;
 
 class HphpArray : public ArrayData {
   enum CopyMode { kSmartCopy, kNonSmartCopy };
-  enum AllocMode { kInline, kSmart, kMalloc };
   enum SortFlavor { IntegerSort, StringSort, GenericSort };
 public:
   friend class ArrayInit;
@@ -45,10 +44,6 @@ public:
     return &s_theEmptyArray;
   }
 
-  static inline const void** getVTablePtr() {
-    return (*(void const***)(&s_theEmptyArray));
-  }
-
 private:
   // for copy-on-write escalation
   HphpArray(CopyMode);
@@ -62,6 +57,23 @@ public:
   HphpArray(uint size, const TypedValue* vals); // make tuple
 
   virtual ~HphpArray();
+
+  // unlike ArrayData::size(), this functions doesn't delegate
+  // to the virtual vsize() functions, so its more efficient to
+  // use this when you know you have an HphpArray.
+  ssize_t getSize() const {
+    return m_size;
+  }
+
+  // This behaves the same as iter_begin except that it assumes
+  // this array is not empty and its not virtual.
+  ssize_t getIterBegin() const {
+    ASSERT(!empty());
+    if (LIKELY((m_data[0].data.m_type < KindOfTombstone))) {
+      return 0;
+    }
+    return nextElm(m_data, 0);
+  }
 
   // dropContentsOnFloor twiddles the HphpArray's internal state such
   // that the destructor will do (almost) no work. Only call it if
@@ -175,35 +187,30 @@ public:
 
   // END overide/implements section
 
-  // nvGet, nvSet and friends.
+  // nvGet and friends.
   // "nv" stands for non-variant. If we know the types of keys and values
   // through runtime and compile-time chicanery, we can directly call these
-  // methods. Note that they are not part of the ArrayData interface. Since
-  // they are by nature micro-optimizations, avoiding vtable indirection is
-  // worthwhile. So, their use is limited to situations where we know we are
-  // using a HphpArray.
+  // methods.
 
   // nvGet returns a pointer to the value if the specified key is in the
   // array, NULL otherwise.
   TypedValue* nvGet(int64 ki) const;
   TypedValue* nvGet(const StringData* k) const;
 
-  // nvGetCell works the same as nvGet, except that it will unwrap any
-  // value that is KindOfRef and return the inner cell.
-  TypedValue* nvGetCell(int64 ki, bool error=false) const;
-  TypedValue* nvGetCell(const StringData* k, bool error=false) const;
+  // nvGetCell is a variation of get, however it unwraps a KindOfRef,
+  // returns KindOfNull if the key doesn't exist, and always warns.
+  TypedValue* nvGetCell(int64 ki) const;
+  TypedValue* nvGetCell(const StringData* k) const;
 
-  ArrayData* nvSet(int64 ki, int64 vi, bool copy);
-  ArrayData* nvSet(int64 ki, const TypedValue* v, bool copy);
-  ArrayData* nvSet(StringData* k, const TypedValue* v, bool copy);
   void nvBind(int64 ki, const TypedValue* v) {
     updateRef(ki, tvAsCVarRef(v));
   }
   void nvBind(StringData* k, const TypedValue* v) {
     updateRef(k, tvAsCVarRef(v));
   }
-  ArrayData* nvAppend(const TypedValue* v, bool copy);
-  void nvAppendWithRef(const TypedValue* v);
+  void nvAppend(const TypedValue* v) {
+    nextInsert(tvAsCVarRef(v));
+  }
   ArrayData* nvNew(TypedValue*& v, bool copy);
   TypedValue* nvGetValueRef(ssize_t pos);
   void nvGetKey(TypedValue* out, ssize_t pos);
@@ -325,6 +332,21 @@ public:
     ElmInd hash[SmallHashSize];
   };
 
+  ElmInd getLastE() const { return m_lastE; }
+  Elm*   getElm(ssize_t pos)  const {
+    ASSERT(unsigned(pos) <= unsigned(m_lastE));
+    return &m_data[pos];
+  }
+  static void getElmKey(Elm* e, TypedValue* out) {
+    if (e->hasIntKey()) {
+      out->m_data.num = e->ikey;
+      out->m_type = KindOfInt64;
+      return;
+    }
+    out->m_data.pstr = e->key;
+    out->m_type = KindOfString;
+    e->key->incRefCount();
+  }
 private:
   // Small: Array elements and the hash table are allocated inline.
   //
@@ -363,20 +385,28 @@ private:
   // m_hash --> |                    | 2^K hash table entries.
   //            +--------------------+
 
+  ElmInd  m_lastE;       // Index of last used element.
   Elm*    m_data;        // Contains elements and hash table.
   ElmInd* m_hash;        // Hash table.
   int64   m_nextKI;      // Next integer key to use for append.
   uint32  m_tableMask;   // Bitmask used when indexing into the hash table.
   uint32  m_hLoad;       // Hash table load (# of non-empty slots).
-  ElmInd  m_lastE;       // Index of last used element.
-  uint8_t m_allocMode;   // enum AllocMode
-  const bool m_nonsmart; // never use smartalloc to allocate Elms
   union {
     InlineSlots m_inline_data;
     ElmInd m_inline_hash[sizeof(m_inline_data) / sizeof(ElmInd)];
   };
 
-  ssize_t /*ElmInd*/ nextElm(Elm* elms, ssize_t /*ElmInd*/ ei) const;
+  ssize_t /*ElmInd*/ nextElm(Elm* elms, ssize_t /*ElmInd*/ ei) const {
+    ASSERT(ei >= -1);
+    ssize_t lastE = m_lastE;
+    while (ei < lastE) {
+      ++ei;
+      if (elms[ei].data.m_type < KindOfTombstone) {
+        return ei;
+      }
+    }
+    return (ssize_t)ElmIndEmpty;
+  }
   ssize_t /*ElmInd*/ prevElm(Elm* elms, ssize_t /*ElmInd*/ ei) const;
 
   ssize_t /*ElmInd*/ find(int64 ki) const;
@@ -398,11 +428,8 @@ private:
     size_t tableMask = m_tableMask;
     size_t probeIndex = h0 & tableMask;
     ElmInd* ei = &m_hash[probeIndex];
-    ssize_t /*ElmInd*/ pos = *ei;
-    if (LIKELY(!validElmInd(pos))) {
-      return ei;
-    }
-    return findForNewInsertLoop(tableMask, h0);
+    return !validElmInd(*ei) ? ei :
+           findForNewInsertLoop(tableMask, h0);
   }
 
   bool nextInsert(CVarRef data);
@@ -421,9 +448,6 @@ private:
   void updateRef(StringData* key, CVarRef data);
 
   void erase(ElmInd* ei, bool updateNext = false);
-
-  // nvUpdate: for internal use by the nv* methods.
-  bool nvUpdate(int64 ki, int64 vi);
 
   HphpArray* copyImpl(HphpArray* target) const;
   HphpArray* copyImpl() const;
@@ -510,15 +534,18 @@ public:
 };
 
 inline bool IsHphpArray(const ArrayData* ad) {
-  return dynamic_cast<const HphpArray*>(ad) != 0;
+  return ad->kind() == ArrayData::kHphpArray;
 }
 
 //=============================================================================
 // VM runtime support functions.
 namespace VM {
 
-ArrayData* array_setm_ik1_iv(TypedValue* cell, ArrayData* ha, int64 key,
-                             int64 value);
+enum ArrayGetFlags {
+  DecRefKey = 1,
+  CheckInts = 2
+};
+
 ArrayData* array_setm_ik1_v(TypedValue* cell, ArrayData* ad, int64 key,
                             TypedValue* value);
 ArrayData* array_setm_ik1_v0(TypedValue* cell, ArrayData* ad, int64 key,
@@ -535,26 +562,12 @@ ArrayData* array_setm_s0k1nc_v(TypedValue* cell, ArrayData* ad, StringData* key,
                                TypedValue* value);
 ArrayData* array_setm_s0k1nc_v0(TypedValue* cell, ArrayData* ad,
                                 StringData* key, TypedValue* value);
-ArrayData* array_setm_wk1_v(TypedValue* cell, ArrayData* ad,
-                            TypedValue* value);
 ArrayData* array_setm_wk1_v0(TypedValue* cell, ArrayData* ad,
                              TypedValue* value);
-ArrayData* array_getm_i(void* hphpArray, int64 key, TypedValue* out)
-  FLATTEN;
-ArrayData* array_getm_s(void* hphpArray, StringData* sd, TypedValue* out)
-  FLATTEN;
-ArrayData* array_getm_s0(void* hphpArray, StringData* sd, TypedValue* out)
-  FLATTEN;
-ArrayData* array_getm_s_fast(void* hphpArray, StringData* sd, TypedValue* out)
-  FLATTEN;
-ArrayData* array_getm_s0_fast(void* hphpArray, StringData* sd, TypedValue* out)
-  FLATTEN;
-void       non_array_getm_i(TypedValue* base, int64 key, TypedValue* out);
-void       non_array_getm_s(TypedValue* base, StringData* key, TypedValue* out);
-void       array_getm_is(ArrayData* ad, int64 ik, StringData* sd,
-			 TypedValue* out) FLATTEN;
-void       array_getm_is0(ArrayData* ad, int64 ik, StringData* sd,
-			  TypedValue* out) FLATTEN;
+ArrayData* array_getm_i(void* hphpArray, int64 key, TypedValue* out);
+
+ArrayData* array_getm_s(ArrayData* a, StringData* key, TypedValue* out,
+                        int flags);
 uint64 array_issetm_s(const void* hphpArray, StringData* sd)
   FLATTEN;
 uint64 array_issetm_s0(const void* hphpArray, StringData* sd)

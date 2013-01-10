@@ -175,7 +175,7 @@ void BucketMapEntry::resetScope() {
     m_num = 0;
   } else {
     m_num = m_stack.back();
-    assert(m_exprs.size() >= m_num);
+    always_assert(m_exprs.size() >= m_num);
     m_exprs.resize(m_num);
   }
 }
@@ -199,7 +199,7 @@ void BucketMapEntry::stash(size_t from, ExpressionPtrList &to) {
   ExpressionPtrList::iterator it = m_exprs.begin(), end = m_exprs.end();
   m_num = from;
   while (from--) {
-    assert(it != end);
+    always_assert(it != end);
     ++it;
   }
   while (it != end) {
@@ -367,7 +367,7 @@ static bool compareArrays(ArrayElementExpressionPtr e1,
       e1->getOffset()->getCanonID() != e2->getOffset()->getCanonID()) {
     return false;
   }
-  assert(e1->getOffset()->getCanonID() != 0);
+  always_assert(e1->getOffset()->getCanonID() != 0);
 
   if (e1->getVariable()->getCanonID() == e2->getVariable()->getCanonID() &&
       e1->getVariable()->getCanonID() != 0) {
@@ -1295,7 +1295,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
           default:
             break;
         }
-        assert(rep->getKindOf() == ae->getVariable()->getKindOf());
+        always_assert(rep->getKindOf() == ae->getVariable()->getKindOf());
         ae->getVariable()->setCanonID(rep->getCanonID());
       } else {
         ae->getVariable()->setCanonID(m_nextID++);
@@ -1340,7 +1340,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
 
                   AssignmentExpressionPtr a = spc(AssignmentExpression, rep);
 
-                  assert(
+                  always_assert(
                     a->getVariable()->is(Expression::KindOfSimpleVariable));
                   SimpleVariablePtr variable =
                     spc(SimpleVariable, a->getVariable());
@@ -1430,7 +1430,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
       */
       bool doArrayCSE = Option::ArrayAccessIdempotent && m_postOpt;
       if (e->hasContext(Expression::AccessContext)) {
-        assert(doAccessChains);
+        always_assert(doAccessChains);
         if (e->getContext() & (Expression::LValue|
                                Expression::RefValue|
                                Expression::RefParameter|
@@ -1555,7 +1555,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
                 ExpressionPtr orig;
                 int i = findInterf(rhs, true, orig);
                 if (i == SameAccess &&
-                    (sameExpr(cur, orig) || next && sameExpr(next, orig))) {
+                    (sameExpr(cur, orig) || (next && sameExpr(next, orig)))) {
                   e->recomputeEffects();
                   return e->replaceValue(canonicalizeRecurNonNull(rhs));
                 }
@@ -1591,7 +1591,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
       BinaryOpExpressionPtr bop = spc(BinaryOpExpression, e);
       int rop = getOpForAssignmentOp(bop->getOp());
       if (bop->hasContext(Expression::DeadStore)) {
-        assert(rop);
+        always_assert(rop);
         ExpressionPtr rhs = bop->getExp2();
         ExpressionPtr lhs = bop->getExp1();
         lhs->clearContext();
@@ -1683,7 +1683,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
             default:
               break;
           }
-          assert(alt->getKindOf() == lhs->getKindOf());
+          always_assert(alt->getKindOf() == lhs->getKindOf());
           lhs->setCanonID(alt->getCanonID());
         } else {
           lhs->setCanonID(m_nextID++);
@@ -1718,7 +1718,7 @@ ExpressionPtr AliasManager::canonicalizeNode(
                 default:
                   break;
               }
-              assert(alt->getKindOf() == uop->getExpression()->getKindOf());
+              always_assert(alt->getKindOf() == uop->getExpression()->getKindOf());
               uop->getExpression()->setCanonID(alt->getCanonID());
             } else {
               uop->getExpression()->setCanonID(m_nextID++);
@@ -1963,7 +1963,7 @@ StatementPtr AliasManager::canonicalizeRecur(StatementPtr s, int &ret) {
     break;
 
   case Statement::KindOfIfBranchStatement:
-    assert(0);
+    always_assert(0);
     break;
 
   case Statement::KindOfForStatement:
@@ -2274,10 +2274,12 @@ int AliasManager::collectAliasInfoRecur(ConstructPtr cs, bool unused) {
           if (ref) {
             sym->setReferenced();
           }
+          bool unset = ((context & Expression::UnsetContext) &&
+            (context & Expression::LValue));
           if (sv->isThis()) {
             sv->getFunctionScope()->setContainsThis();
             if (!e->hasContext(Expression::ObjectContext)) {
-              sv->getFunctionScope()->setContainsBareThis(true, ref);
+              sv->getFunctionScope()->setContainsBareThis(true, ref || unset);
             } else if (m_graph) {
               int &id = m_gidMap["v:this"];
               if (!id) id = m_gidMap.size();
@@ -2286,8 +2288,7 @@ int AliasManager::collectAliasInfoRecur(ConstructPtr cs, bool unused) {
           } else if (m_graph) {
             m_objMap[sym->getName()] = sv;
           }
-          if ((context & Expression::UnsetContext) &&
-              (context & Expression::LValue)) {
+          if (unset) {
             sym->setReseated();
           }
           if (!(context & (Expression::AssignmentLHS |
@@ -2358,7 +2359,7 @@ int AliasManager::collectAliasInfoRecur(ConstructPtr cs, bool unused) {
       case Expression::KindOfStaticMemberExpression:
       case Expression::KindOfNewObjectExpression: {
         StaticClassName *p = dynamic_cast<StaticClassName*>(e.get());
-        assert(p);
+        always_assert(p);
         bool useLSB = false;
         if (p->isStatic()) {
           useLSB = true;
@@ -2503,7 +2504,7 @@ static void markAvailable(ExpressionRawPtr e) {
     sv->setNonNull();
   } else {
     StaticClassName *scn = dynamic_cast<StaticClassName*>(e.get());
-    assert(scn);
+    always_assert(scn);
     scn->setPresent();
   }
 }
@@ -2597,6 +2598,9 @@ private:
         new ExpressionList(
           CONSTRUCT_PARAMS(target),
           ExpressionList::ListKindComma));
+    if (target->isUnused()) {
+      el->setUnused(true);
+    }
     el->addElement(assertion);
     el->addElement(target);
     el->setNoRemove(); // since it contains an assertion
@@ -3558,6 +3562,26 @@ public:
         }
       }
     }
+
+    if (auto rs = dynamic_pointer_cast<ReturnStatement>(cp)) {
+      std::vector<std::string> lnames;
+      VariableTableConstPtr vars = cp->getFunctionScope()->getVariables();
+      vars->getLocalVariableNames(lnames);
+      for (auto& l : lnames) {
+        int id = m_gidMap["v:" + l];
+        if (id && !m_block->getBit(DataFlow::PInitOut, id)) {
+          rs->addNonRefcounted(l);
+        } else {
+          auto sym = vars->getSymbol(l);
+          auto dt = vars->getFinalType(l)->getDataType();
+          if (!sym->isStatic()
+              && !IS_REFCOUNTED_TYPE(dt) && dt != KindOfUnknown) {
+            rs->addNonRefcounted(l);
+          }
+        }
+      }
+    }
+
     return DataFlowWalker::after(cp);
   }
 private:
@@ -3645,7 +3669,7 @@ void AliasManager::doFinal(MethodStatementPtr m) {
 }
 
 void AliasManager::performReferencedAndNeededAnalysis(MethodStatementPtr m) {
-  assert(m_graph != NULL);
+  always_assert(m_graph != NULL);
 
   // bail out for pseudomain context
   if (m->getScope()->inPseudoMain()) return;
@@ -3959,9 +3983,9 @@ void AliasManager::pushStringScope(StatementPtr s) {
 
 void AliasManager::popStringScope(StatementPtr s) {
   size_t sz = m_loopInfo.size();
-  assert(sz);
+  always_assert(sz);
   LoopInfo &li1 = m_loopInfo.back();
-  assert(li1.m_stmt == s);
+  always_assert(li1.m_stmt == s);
   if (li1.m_candidates.size() && li1.m_valid) {
     for (unsigned i = li1.m_inner.size(); i--; ) {
       if (LoopStatementPtr inner = dpc(LoopStatement, li1.m_inner[i])) {

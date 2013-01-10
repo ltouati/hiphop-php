@@ -17,6 +17,12 @@
 #ifndef incl_VM_CLASS_H_
 #define incl_VM_CLASS_H_
 
+#include <bitset>
+#include <tbb/concurrent_hash_map.h>
+#ifdef USE_JEMALLOC
+# include <jemalloc/jemalloc.h>
+#endif
+
 #include <runtime/vm/core_types.h>
 #include <runtime/vm/repo_helpers.h>
 #include <runtime/base/array/hphp_array.h>
@@ -46,6 +52,9 @@ class Class;
 class Instance;
 class NamedEntity;
 class PreClass;
+namespace Transl {
+class TranslatorX64;
+}
 
 typedef hphp_hash_set<const StringData*, string_data_hash,
                       string_data_isame> TraitNameSet;
@@ -252,7 +261,7 @@ class PreClass : public AtomicCountable {
     return &m_properties[s];
   }
 
-  BuiltinCtorFunction instanceCtor() { return m_InstanceCtor; }
+  BuiltinCtorFunction instanceCtor() const { return m_InstanceCtor; }
   int builtinPropSize() { return m_builtinPropSize; }
 
   void prettyPrint(std::ostream& out) const;
@@ -465,6 +474,7 @@ public:
   friend class ExecutionContext;
   friend class HPHP::ObjectData;
   friend class Instance;
+  friend class Unit;
 
   enum Avail {
     AvailFalse,
@@ -505,6 +515,7 @@ public:
     const PropInitVec& operator=(const PropInitVec&);
     ~PropInitVec();
     static PropInitVec* allocInRequestArena(const PropInitVec& src);
+    static size_t dataOff() { return offsetof(PropInitVec, m_data); }
 
     typedef TypedValue* iterator;
     iterator begin() { return m_data; }
@@ -534,7 +545,16 @@ public:
   void atomicRelease();
 
   static bool alwaysLowMem() {
+    // jemalloc 3.2.0 and later support allocating objects in low memory
+    // (addresses that fit in 32 bits), and we take advantage of this in
+    // translated code.
+#if defined(JEMALLOC_VERSION) &&                                        \
+  ((JEMALLOC_VERSION_MAJOR == 3 && JEMALLOC_VERSION_MINOR >= 2) ||      \
+   JEMALLOC_VERSION_MAJOR > 3)
     return use_jemalloc && RuntimeOption::RepoAuthoritative;
+#else
+    return false;
+#endif
   }
   static size_t sizeForNClasses(unsigned nClasses) {
     return offsetof(Class, m_classVec) + (sizeof(Class*) * nClasses);
@@ -608,6 +628,7 @@ public:
   int getODAttrs() const { return m_ODAttrs; }
 
   int builtinPropSize() { return m_builtinPropSize; }
+  BuiltinCtorFunction instanceCtor() { return m_InstanceCtor; }
 
   // Interfaces this class declares in its "implements" clause.
   const std::vector<ClassPtr>& declInterfaces() const {
@@ -634,7 +655,7 @@ public:
    * and the dependencies are a bit hairy, it's defined in targetcache.cpp.
    */
   const Func* wouldCall(const Func* prev) const;
-  
+
   // Finds the base class defining the given method (NULL if none).
   // Note: for methods imported via traits, the base class is the one that
   // uses/imports the trait.
@@ -650,6 +671,12 @@ public:
   TypedValue* clsCnsGet(const StringData* clsCnsName) const;
   DataType clsCnsType(const StringData* clsCnsName) const;
   void initialize() const;
+  void initPropHandle() const;
+  unsigned propHandle() const { return m_propDataCache; }
+  void initSPropHandle() const;
+  unsigned sPropHandle() const { return m_propSDataCache; }
+  void initProps() const;
+  TypedValue* initSProps() const;
   Class* getCached() const;
   void setCached();
 
@@ -692,8 +719,26 @@ public:
 public:
   static hphp_hash_map<const StringData*, const HhbcExtClassInfo*,
                        string_data_hash, string_data_isame> s_extClassHash;
+  static size_t instanceBitsOff() { return offsetof(Class, m_instanceBits); }
+  static void profileInstanceOf(const StringData* name);
+  static void initInstanceBits();
+  static bool haveInstanceBit(const StringData* name);
+  static bool getInstanceBitMask(const StringData* name,
+                                 int& offset, uint8& mask);
 
 private:
+  typedef tbb::concurrent_hash_map<
+    const StringData*, uint64, pointer_hash<StringData>> InstanceCounts;
+  typedef hphp_hash_map<const StringData*, unsigned,
+                        pointer_hash<StringData>> InstanceBitsMap;
+  typedef std::bitset<128> InstanceBits;
+  static const size_t kInstanceBits = sizeof(InstanceBits) * CHAR_BIT;
+  static InstanceCounts s_instanceCounts;
+  static ReadWriteMutex s_instanceCountsLock;
+  static InstanceBitsMap s_instanceBits;
+  static ReadWriteMutex s_instanceBitsLock;
+  static bool s_instanceBitsInit;
+
   struct TraitMethod {
     ClassPtr          m_trait;
     Func*             m_method;
@@ -711,8 +756,8 @@ private:
 
   void initialize(TypedValue*& sPropData) const;
   HphpArray* initClsCnsData() const;
-  PropInitVec* initProps() const;
-  TypedValue* initSProps() const;
+  PropInitVec* initPropsImpl() const;
+  TypedValue* initSPropsImpl() const;
   void setPropData(PropInitVec* propData) const;
   void setSPropData(TypedValue* sPropData) const;
   TypedValue* getSPropData() const;
@@ -762,6 +807,9 @@ private:
   void setInterfaces();
   void setClassVec();
   void setUsedTraits();
+  void setInstanceBits();
+  void setInstanceBitsAndParents();
+  template<bool setParents> void setInstanceBitsImpl();
 
   PreClassPtr m_preClass;
   ClassPtr m_parent;
@@ -805,8 +853,8 @@ private:
   int m_builtinPropSize;
   int m_declPropNumAccessible;
   unsigned m_classVecLen;
-public: // used by Unit
-  unsigned m_cachedOffset;
+public:
+  unsigned m_cachedOffset; // used by Unit
 private:
   unsigned m_propDataCache;
   unsigned m_propSDataCache;
@@ -836,10 +884,15 @@ private:
 public: // used in Unit
   Class* m_nextClass;
 private:
-  // Vector of Class pointers that encodes the inheritance hierarchy,
-  // including this Class as the last element. This vector enables
-  // fast type compatibility checks in translated code when accessing
-  // declared properties.
+  // m_instanceBits and m_classVec are both used for efficient
+  // instanceof checking in translated code.
+
+  // Bitmap of parent classes and implemented interfaces. Each bit corresponds
+  // to a commonly used class name, determined during the profiling warmup
+  // requests.
+  InstanceBits m_instanceBits;
+  // Vector of Class pointers that encodes the inheritance hierarchy, including
+  // this Class as the last element.
   Class* m_classVec[1]; // Dynamically sized; must come last.
 };
 

@@ -20,6 +20,7 @@
 #include <runtime/eval/debugger/cmd/cmd_interrupt.h>
 #include <runtime/base/hphp_system.h>
 #include <runtime/vm/translator/translator.h>
+#include <runtime/vm/translator/translator-inline.h>
 #include <util/text_color.h>
 #include <util/util.h>
 #include <util/logger.h>
@@ -44,6 +45,7 @@ DebuggerProxyPtr Debugger::StartClient(const DebuggerClientOptions &options) {
 }
 
 void Debugger::Stop() {
+  s_debugger.m_proxyMap.clear();
   DebuggerServer::Stop();
   if (s_clientStarted) {
     DebuggerClient::Stop();
@@ -174,6 +176,7 @@ bool Debugger::InterruptException(CVarRef e) {
     ThreadInfo *ti = ThreadInfo::s_threadInfo.getNoCheck();
     if (ti->m_reqInjectionData.debugger) {
       if (hhvm) {
+        HPHP::VM::Transl::VMRegAnchor _;
         InterruptVMHook(ExceptionThrown, e);
       } else {
         if (ti->m_top) {

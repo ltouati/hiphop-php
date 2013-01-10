@@ -19,24 +19,27 @@
 #include <runtime/vm/event_hook.h>
 #include <runtime/vm/func.h>
 #include <runtime/vm/funcdict.h>
-#include <runtime/base/tv_macros.h>
 #include <runtime/base/builtin_functions.h>
 #include <runtime/vm/translator/translator-inline.h>
 
 namespace HPHP {
 namespace VM {
 
-int64 new_iter_array(HPHP::VM::Iter* dest, HphpArray* arr);
-int64 new_iter_object(HPHP::VM::Iter* dest, ObjectData* obj, Class* ctx);
-int64 iter_next_array(HPHP::VM::Iter* dest);
-void iter_value_cell_array(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_value_cell_iterator(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_value_cell_local_array(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_value_cell_local_iterator(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_key_cell_array(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_key_cell_iterator(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_key_cell_local_array(HPHP::VM::Iter* iter, TypedValue* out);
-void iter_key_cell_local_iterator(HPHP::VM::Iter* iter, TypedValue* out);
+int64 new_iter_array(HPHP::VM::Iter* dest, ArrayData* arr,
+                     TypedValue* val);
+int64 new_iter_array_key(HPHP::VM::Iter* dest, ArrayData* arr,
+                         TypedValue* val, TypedValue* key);
+int64 new_iter_object(HPHP::VM::Iter* dest, ObjectData* obj, Class* ctx,
+                      TypedValue* val, TypedValue* key);
+int64 iter_next(HPHP::VM::Iter* dest, TypedValue* val);
+int64 iter_next_key(HPHP::VM::Iter* dest, TypedValue* val, TypedValue* key);
+
+ArrayData* new_array(int capacity);
+ArrayData* new_tuple(int numArgs, const TypedValue* args);
+
+ObjectData* newVectorHelper(int nElems);
+ObjectData* newMapHelper(int nElems);
+ObjectData* newStableMapHelper(int nElems);
 
 StringData* concat_is(int64 v1, StringData* v2);
 StringData* concat_si(StringData* v1, int64 v2);
@@ -102,7 +105,7 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
     ExtraArgs::deallocate(fp);
   }
   // Free locals
-  for (int i = 0; i < numLocals; i++) {
+  for (int i = numLocals - 1; i >= 0; --i) {
     TRACE_MOD(Trace::runtime, 5,
               "RetC: freeing %d'th local of %d\n", i,
               fp->m_func->numLocals());
@@ -114,7 +117,7 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
       // to call a __destruct method. Null out the local before
       // calling the destructor so that stacktrace logic doesn't
       // choke.
-      TV_WRITE_UNINIT(loc);
+      tvWriteUninit(loc);
       tvDecRefHelper(t, datum);
     }
   }
@@ -122,17 +125,15 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
 
 inline void ALWAYS_INLINE
 frame_free_locals_inl(ActRec* fp, int numLocals) {
-  frame_free_locals_helper_inl(fp, numLocals);
-  // Destroying the locals may re-enter the VM and take a backtrace which
-  // accesses the 'this' field from this frame, so we need to destroy 'this'
-  // after destroying the locals.
   if (fp->hasThis()) {
     ObjectData* this_ = fp->getThis();
+    // If a destructor for a local calls debug_backtrace, it can read
+    // the m_this field from the ActRec, so we need to zero it to
+    // ensure they can't access a free'd object.
     fp->setThis(NULL);
-    if (this_->decRefCount() == 0) {
-      this_->release();
-    }
+    decRefObj(this_);
   }
+  frame_free_locals_helper_inl(fp, numLocals);
   EventHook::FunctionExit(fp);
 }
 
@@ -142,8 +143,24 @@ frame_free_locals_no_this_inl(ActRec* fp, int numLocals) {
   EventHook::FunctionExit(fp);
 }
 
-void frame_free_locals(ActRec* fp, int numLocals);
-void frame_free_locals_no_this(ActRec* fp, int numLocals);
+inline void ALWAYS_INLINE
+frame_free_args(TypedValue* args, int count) {
+  for (int i = 0; i < count; i++) {
+    TypedValue* loc = args - i;
+    DataType t = loc->m_type;
+    if (IS_REFCOUNTED_TYPE(t)) {
+      uint64_t datum = loc->m_data.num;
+      // When destroying an array or object we can reenter the VM
+      // to call a __destruct method. Null out the local before
+      // calling the destructor so that stacktrace logic doesn't
+      // choke.
+      tvWriteUninit(loc);
+      tvDecRefHelper(t, datum);
+    }
+  }
+
+}
+
 Unit* compile_file(const char* s, size_t sz, const MD5& md5, const char* fname);
 Unit* compile_string(const char* s, size_t sz);
 Unit* build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,
@@ -250,6 +267,27 @@ newInstance(Class* cls) {
 }
 
 HphpArray* get_static_locals(const ActRec* ar);
+
+/*
+ * A few functions are exposed by libhphp_analysis and used in
+ * VM-specific parts of the runtime.
+ *
+ * Currently we handle this by using these global pointers, which must
+ * be set up before you use those parts of the runtime.
+ */
+
+typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*);
+typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
+typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
+
+extern CompileStringFn g_hphp_compiler_parse;
+extern BuildNativeFuncUnitFn g_hphp_build_native_func_unit;
+extern BuildNativeClassUnitFn g_hphp_build_native_class_unit;
+
+void collection_setm_wk1_v0(ObjectData* obj, TypedValue* value);
+void collection_setm_ik1_v0(ObjectData* obj, int64 key, TypedValue* value);
+void collection_setm_sk1_v0(ObjectData* obj, StringData* key,
+                            TypedValue* value);
 
 } }
 #endif

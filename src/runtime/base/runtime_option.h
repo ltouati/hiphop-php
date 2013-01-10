@@ -50,6 +50,7 @@ public:
 
   static std::string LogFile;
   static std::string LogFileSymLink;
+  static int LogHeaderMangle;
   static bool AlwaysEscapeLog;
   static bool AlwaysLogUnhandledExceptions;
   static bool InjectedStackTrace;
@@ -101,6 +102,7 @@ public:
   static bool ServerThreadDropStack;
   static bool ServerHttpSafeMode;
   static bool ServerStatCache;
+  static std::vector<std::string> ServerWarmupRequests;
   static int PageletServerThreadCount;
   static bool PageletServerThreadRoundRobin;
   static int PageletServerThreadDropCacheTimeoutSeconds;
@@ -259,6 +261,7 @@ public:
   static std::string ProfilerOutputDir;
   static std::string CoreDumpEmail;
   static bool CoreDumpReport;
+  static std::string CoreDumpReportDirectory;
   static bool LocalMemcache;
   static bool MemcacheReadOnly;
 
@@ -361,6 +364,7 @@ public:
   static bool EnableXHP;
   static bool EnableObjDestructCall;
   static bool EnableEmitSwitch;
+  static bool EnableEmitterStats;
   static bool EnableEvalOptimization;
   static int  EvalScalarValueExprLimit;
   static bool CheckSymLink;
@@ -414,6 +418,7 @@ public:
   static bool EvalJitMGeneric;
   static bool EvalJitUseIR;
   static bool EvalIRPuntDontInterp;
+  static bool EvalHHIRGenericDtorHelper;
   static bool EvalHHIRMemOpt;
   static uint32 EvalHHIRNumFreeRegs;
   static bool EvalHHIREnableRematerialization;
@@ -435,11 +440,17 @@ public:
   static bool RecordCodeCoverage;
   static std::string CodeCoverageOutputFile;
 
+  // TranslatorX64 allocation options
+  static size_t VMTranslASize;
+  static size_t VMTranslAStubsSize;
+  static size_t VMTranslGDataSize;
+
   // Repo (hhvm bytecode repository) options
   static std::string RepoLocalMode;
   static std::string RepoLocalPath;
   static std::string RepoCentralPath;
   static std::string RepoEvalMode;
+  static std::string RepoJournal;
   static bool RepoCommit;
   static bool RepoDebugInfo;
   static bool RepoAuthoritative;

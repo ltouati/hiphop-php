@@ -121,6 +121,7 @@ void c_Continuation::t_update(int64 label, CVarRef value) {
 void c_Continuation::t_done() {
   INSTANCE_METHOD_INJECTION_BUILTIN(Continuation, Continuation::done);
   m_done = true;
+  m_value.setNull();
 }
 
 int64 c_Continuation::t_getlabel() {
@@ -184,6 +185,7 @@ inline void c_Continuation::nextImpl(FI& fi) {
     if (e.instanceof("exception")) {
       m_running = false;
       m_done = true;
+      m_value.setNull();
       throw_exception(e);
     } else {
       throw;
@@ -200,10 +202,10 @@ void c_Continuation::t_next() {
   nextImpl(fi);
 }
 
+static StaticString s_next("next");
 void c_Continuation::t_rewind() {
   INSTANCE_METHOD_INJECTION_BUILTIN(Continuation, Continuation::rewind);
-  throw_exception(Object(SystemLib::AllocExceptionObject(
-    "Cannot rewind on a Continuation object")));
+  this->o_invoke(s_next, Array());
 }
 
 bool c_Continuation::t_valid() {
@@ -252,7 +254,9 @@ String c_Continuation::t_getorigfuncname() {
   INSTANCE_METHOD_INJECTION_BUILTIN(Continuation, Continuation::getorigfuncname);
   String called_class;
   if (hhvm) {
-    if (actRec()->hasClass()) {
+    if (actRec()->hasThis()) {
+      called_class = actRec()->getThis()->getVMClass()->name()->data();
+    } else if (actRec()->hasClass()) {
       called_class = actRec()->getClass()->name()->data();
     }
   } else {

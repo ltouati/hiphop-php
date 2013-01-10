@@ -48,14 +48,44 @@ public:
    */
   ArrayIter();
   ArrayIter(const ArrayData* data);
-  ArrayIter(const ArrayData* data, int);
+
+  enum NoInc { noInc = 0 };
+// Special constructor used by the VM. This constructor does not
+// increment the refcount of the specified array.
+  ArrayIter(const ArrayData* data, NoInc) {
+    setArrayData(data);
+    if (data) {
+      m_pos = data->iter_begin();
+    } else {
+      m_pos = ArrayData::invalid_index;
+    }
+  }
+  // This is also a special constructor used by the VM. This
+  // constructor doesn't increment the array's refcount and assumes
+  // that the array is not empty.
+  enum NoIncNonNull { noIncNonNull = 0 };
+  ArrayIter(const HphpArray* data, NoIncNonNull) {
+    ASSERT(data);
+    setArrayData(data);
+    m_pos = data->getIterBegin();
+  }
   ArrayIter(CArrRef array);
+  void begin(CVarRef map, CStrRef);
+  void begin(CArrRef map, CStrRef);
+  void reset();
 private:
+  // not defined.
+  // Either use ArrayIter(const ArrayData*) or
+  //            ArrayIter(const HphpArray*, NoIncNonNull)
+  ArrayIter(const HphpArray*);
   template <bool incRef>
-  void objInit(ObjectData* obj, bool rewind = true);
+  void objInit(ObjectData* obj);
 public:
-  ArrayIter(ObjectData* obj, bool rewind = true);
-  ArrayIter(ObjectData* obj, int);
+  ArrayIter(ObjectData* obj);
+  ArrayIter(ObjectData* obj, NoInc);
+  enum TransferOwner { transferOwner };
+  ArrayIter(Object& obj, TransferOwner);
+
   ~ArrayIter();
 
   operator bool() { return !end(); }
@@ -111,7 +141,6 @@ public:
     return const_cast<ArrayData*>(ad)->nvGetValueRef(m_pos);
   }
 
-private:
   union {
     const ArrayData* m_data;
     ObjectData* m_obj;
@@ -119,9 +148,11 @@ private:
   ssize_t m_pos;
   int m_versionNumber;
 
+ public:
   bool hasArrayData() {
     return !((intptr_t)m_data & 1);
   }
+ private:
   bool hasVector() {
     return (!hasArrayData() &&
             getRawObject()->getCollectionType() == Collection::VectorType);
@@ -138,11 +169,18 @@ private:
     return (!hasArrayData() &&
             getRawObject()->getCollectionType() == Collection::InvalidType);
   }
-
+ public:
   const ArrayData* getArrayData() {
     ASSERT(hasArrayData());
     return m_data;
   }
+  ssize_t getPos() {
+    return m_pos;
+  }
+  void setPos(ssize_t newPos) {
+    m_pos = newPos;
+  }
+ private:
   c_Vector* getVector() {
     ASSERT(hasVector());
     return (c_Vector*)((intptr_t)m_obj & ~1);
@@ -221,17 +259,19 @@ private:
  */
 class MutableArrayIter {
 public:
+  MutableArrayIter() : m_data(NULL) {}
   MutableArrayIter(const Variant* var, Variant* key, Variant& val);
   MutableArrayIter(ArrayData* data, Variant* key, Variant& val);
   ~MutableArrayIter();
+  void begin(Variant& map, Variant* key, Variant& val, CStrRef context);
+  void reset();
   void release() { delete this; }
   bool advance();
-
 private:
   const Variant* m_var;
   ArrayData* m_data;
   Variant* m_key;
-  Variant& m_val;
+  Variant* m_valp;
   FullPos m_fp;
   int size();
   ArrayData* getData();

@@ -119,6 +119,10 @@ struct Location {
     return space == This;
   }
 
+  bool isIter() const {
+    return space == Iter;
+  }
+
 public:
   Space space;
   int64 offset;
@@ -126,12 +130,17 @@ public:
 
 struct InputInfo {
   InputInfo(const Location &l)
-    : loc(l), dontBreak(false), dontGuard(l.isLiteral()) {}
+    : loc(l),
+      dontBreak(false),
+      dontGuard(l.isLiteral()),
+      dontGuardInner(false)
+    {}
 
   std::string pretty() const {
     std::string p = loc.pretty();
     if (dontBreak) p += ":dc";
     if (dontGuard) p += ":dg";
+    if (dontGuardInner) p += ":dgi";
     return p;
   }
   Location loc;
@@ -146,6 +155,10 @@ struct InputInfo {
    * account of this input.
    */
   bool     dontGuard;
+  /*
+   * never guard the inner type if this input is KindOfRef
+   */
+  bool     dontGuardInner;
 };
 
 class InputInfos : public std::vector<InputInfo> {
@@ -232,6 +245,7 @@ class RuntimeType {
   RuntimeType(const RuntimeType& copy);
   RuntimeType();
   RuntimeType(const Iter* iter);
+  RuntimeType(Iter::Type type);
 
   static const int UnknownBool = -1;
 

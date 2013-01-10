@@ -38,10 +38,29 @@ class ArrayData : public Countable {
     Merge,
   };
 
+  // enum of possible array types, so we can guard nonvirtual
+  // fast paths in runtime code.
+  enum ArrayKind {
+    kArrayData,
+    kHphpArray
+  };
+
+ protected:
+  // used in subclasses but declared here.
+  enum AllocMode { kInline, kSmart, kMalloc };
+
+ public:
   static const ssize_t invalid_index = -1;
 
-  ArrayData() : m_size(-1), m_pos(0), m_strongIterators(0) {}
-  ArrayData(const ArrayData *src) : m_pos(src->m_pos), m_strongIterators(0) {}
+  ArrayData(ArrayKind kind = kArrayData, bool nonsmart = false) :
+    m_size(-1), m_pos(0), m_strongIterators(0), m_kind(kind),
+    m_nonsmart(nonsmart) {
+  }
+  ArrayData(const ArrayData *src, ArrayKind kind = kArrayData,
+            bool nonsmart = false) :
+    m_pos(src->m_pos), m_strongIterators(0), m_kind(kind),
+    m_nonsmart(nonsmart) {
+  }
   virtual ~ArrayData();
 
   /**
@@ -78,6 +97,13 @@ class ArrayData : public Countable {
    */
   bool empty() const {
     return size() == 0;
+  }
+
+  /**
+   * return the array kind for fast typechecks
+   */
+  ArrayKind kind() const {
+    return (ArrayKind)m_kind;
   }
 
   /**
@@ -167,11 +193,8 @@ class ArrayData : public Countable {
   virtual TypedValue* nvGet(const StringData* k) const;
   virtual void nvGetKey(TypedValue* out, ssize_t pos);
   virtual TypedValue* nvGetValueRef(ssize_t pos);
-  virtual ArrayData* nvSet(int64 ki, int64 vi, bool copy);
-  virtual ArrayData* nvSet(int64 ki, const TypedValue* v, bool copy);
-  virtual ArrayData* nvSet(StringData* k, const TypedValue* v, bool copy);
-  virtual TypedValue* nvGetCell(int64 ki, bool error) const;
-  virtual TypedValue* nvGetCell(const StringData* k, bool error) const;
+  virtual TypedValue* nvGetCell(int64 ki) const;
+  virtual TypedValue* nvGetCell(const StringData* k) const;
 
   /**
    * Get the numeric index for a key. Only these need to be
@@ -271,6 +294,12 @@ class ArrayData : public Countable {
   ArrayData *remove(litstr k, bool copy);
   ArrayData *remove(CStrRef k, bool copy);
   ArrayData *remove(CVarRef k, bool copy);
+
+  /*
+   * Inline wrappers that just use tvAsCVarRef on the value
+   */
+  ArrayData* nvSet(int64 ki, const TypedValue* v, bool copy);
+  ArrayData* nvSet(StringData* k, const TypedValue* v, bool copy);
 
   virtual ssize_t iter_begin() const;
   virtual ssize_t iter_end() const;
@@ -393,7 +422,7 @@ class ArrayData : public Countable {
     m_flags = (m_flags & ~kSiPastEnd) | (b ? kSiPastEnd : 0);
   }
   void setStrongIterators(FullPos* p) {
-    m_flags = uintptr_t(p) | m_flags & kSiPastEnd;
+    m_flags = uintptr_t(p) | (m_flags & kSiPastEnd);
   }
   // error-handling helpers
   static CVarRef getNotFound(int64 k);
@@ -417,7 +446,23 @@ class ArrayData : public Countable {
     FullPos* m_strongIterators; // head of linked list
     uintptr_t m_flags;
   };
+ protected:
+  const uint8_t m_kind;  // enum ArrayKind
+  const bool m_nonsmart; // never use smartalloc to allocate Elms
+  uint8_t m_allocMode;   // enum AllocMode
+  /* The 4 bytes of padding here are available to subclasses if their
+   * first field is also <= 4 bytes. */
+
+ public: // for the JIT
+  static uint32_t getKindOff() {
+    return (uintptr_t)&((ArrayData*)0)->m_kind;
+  }
 };
+
+ALWAYS_INLINE inline
+void decRefArr(ArrayData* arr) {
+  if (arr->decRefCount() == 0) arr->release();
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 }

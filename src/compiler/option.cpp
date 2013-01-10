@@ -73,6 +73,10 @@ vector<string> Option::DynamicClassPrefixes;
 vector<string> Option::DynamicClassPostfixes;
 set<string> Option::DynamicInvokeFunctions;
 set<string> Option::VolatileClasses;
+map<string,string> Option::AutoloadClassMap;
+map<string,string> Option::AutoloadFuncMap;
+map<string,string> Option::AutoloadConstMap;
+string Option::AutoloadRoot;
 
 map<string, string> Option::FunctionSections;
 
@@ -206,6 +210,7 @@ std::string Option::PreprocessedPartitionConfig;
 bool Option::ParseTimeOpts = true;
 bool Option::OutputHHBC = false;
 bool Option::EnableHipHopSyntax = false;
+bool Option::JitEnableRenameFunction = false;
 bool Option::EnableHipHopExperimentalSyntax = false;
 bool Option::EnableShortTags = true;
 bool Option::EnableAspTags = false;
@@ -397,6 +402,14 @@ void Option::Load(Hdf &config) {
     RepoDebugInfo = repo["DebugInfo"].getBool(false);
   }
 
+  {
+    Hdf autoloadMap = config["AutoloadMap"];
+    autoloadMap["class"].get(AutoloadClassMap);
+    autoloadMap["function"].get(AutoloadFuncMap);
+    autoloadMap["constant"].get(AutoloadConstMap);
+    AutoloadRoot = autoloadMap["root"].getString();
+  }
+
   ScalarArrayFileCount = config["ScalarArrayFileCount"].getByte(1);
   if (ScalarArrayFileCount <= 0) ScalarArrayFileCount = 1;
   LiteralStringFileCount = config["LiteralStringFileCount"].getInt32(2);
@@ -411,6 +424,7 @@ void Option::Load(Hdf &config) {
   }
 
   EnableHipHopSyntax = config["EnableHipHopSyntax"].getBool();
+  JitEnableRenameFunction = config["JitEnableRenameFunction"].getBool();
   EnableHipHopExperimentalSyntax =
     config["EnableHipHopExperimentalSyntax"].getBool();
   EnableShortTags = config["EnableShortTags"].getBool(true);

@@ -140,6 +140,7 @@ define('AllowIntercept',                 1 << 24);
 define('NoProfile',                      1 << 25);
 define('ContextSensitive',               1 << 26);
 define('NoDefaultSweep',                 1 << 27);
+define('NeedsActRec',                    1 << 31);
 // Mask for checking the flags related to variable arguments
 define('VarArgsMask', (VariableArguments | RefVariableArguments |
                        MixedVariableArguments));
@@ -175,6 +176,7 @@ function get_flag_names($arr, $name, $global_func) {
   if ($flag & NoProfile             ) $ret .= ' | NoProfile'             ;
   if ($flag & ContextSensitive      ) $ret .= ' | ContextSensitive'      ;
   if ($flag & NoDefaultSweep        ) $ret .= ' | NoDefaultSweep'        ;
+  if ($flag & NeedsActRec           ) $ret .= ' | NeedsActRec'           ;
 
   if ($ret == '') {
     throw new Exception("invalid flag $flag");
@@ -269,6 +271,7 @@ function DefineFunction($func) {
   }
   if (!isset($func['return'])) $func['return'] = array();
   $func['ret_desc'] = idx($func['return'], 'desc');
+  $func['ret_hint'] = idx($func['return'], 'hint');
   $func['return'] = idx($func['return'], 'type');
   if ($func['return'] & Reference) {
     $func['ref'] = true;
@@ -461,10 +464,12 @@ function generateFuncCPPInclude($func, $f, $newline = true) {
     fprintType($f, $arg['type']);
     fprintf($f, ', ');
     if (isset($arg['default'])) {
-      fprintf($f, '"%s", ', escape_cpp($arg['defaultSerialized']));
+      $serialized = escape_cpp($arg['defaultSerialized']);
+      fprintf($f, '"%s", S(%d), ',
+              $serialized, strlen($arg['defaultSerialized']));
       fprintf($f, '"%s", ', escape_cpp($arg['defaultText']));
     } else {
-      fprintf($f, 'NULL, NULL, ');
+      fprintf($f, 'NULL, S(0), NULL, ');
     }
     fprintf($f, 'S(%d), ', idx($arg, 'ref') ? 1 : 0);
   }
@@ -620,14 +625,12 @@ function generateFuncProfileHeader($func, $f) {
   } else if (!($func['flags'] & NoInjection)) {
     fprintf($f, "  FUNCTION_INJECTION_BUILTIN(%s);\n", $func['name']);
   }
-  if (isset($func['taint_observer'])) {
-    if ($func['taint_observer'] !== false) {
-      fprintf(
-        $f,
-        "  TAINT_OBSERVER(%s, %s);\n",
-        $func['taint_observer']['set_mask'],
-        $func['taint_observer']['clear_mask']);
-    }
+  if (!empty($func['taint_observer'])) {
+    fprintf(
+      $f,
+      "  TAINT_OBSERVER(%s, %s);\n",
+      $func['taint_observer']['set_mask'],
+      $func['taint_observer']['clear_mask']);
   }
 
   fprintf($f, "  ");

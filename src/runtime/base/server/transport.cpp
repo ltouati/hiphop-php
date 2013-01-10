@@ -29,7 +29,7 @@
 #include <util/util.h>
 #include <util/logger.h>
 #include <util/compatibility.h>
-#include <util/hardware_counter.h>
+#include <runtime/base/hardware_counter.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -70,8 +70,8 @@ void Transport::onRequestStart(const timespec &queueTime) {
    * The hardware counter is only 48 bits, so reset this at the beginning
    * of every request to make sure we don't overflow.
    */
-  Util::HardwareCounter::Reset();
-  m_instructions = Util::HardwareCounter::GetInstructionCount();
+  HardwareCounter::Reset();
+  m_instructions = HardwareCounter::GetInstructionCount();
 }
 
 const char *Transport::getMethodName() {
@@ -351,10 +351,10 @@ void Transport::addHeaderNoLock(const char *name, const char *value) {
   if (!m_firstHeaderSet) {
     m_firstHeaderSet = true;
     m_firstHeaderFile = hhvm
-                        ? g_vmContext->getContainingFileName(true).data()
+                        ? g_vmContext->getContainingFileName().data()
                         : FrameInjection::GetContainingFileName(true).data();
     m_firstHeaderLine = hhvm
-                        ? g_vmContext->getLine(true)
+                        ? g_vmContext->getLine()
                         : FrameInjection::GetLine(true);
   }
 
@@ -499,6 +499,10 @@ bool Transport::decideCompression() {
 
 std::string Transport::getHTTPVersion() const {
   return "1.1";
+}
+
+int Transport::getRequestSize() const {
+  return 0;
 }
 
 void Transport::setMimeType(CStrRef mimeType) {

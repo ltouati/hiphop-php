@@ -40,7 +40,7 @@
 #include <util/timer.h>
 #include <util/stack_trace.h>
 #include <util/light_process.h>
-#include <util/stat_cache.h>
+#include <runtime/base/stat_cache.h>
 #include <runtime/base/source_info.h>
 #include <runtime/base/rtti_info.h>
 #include <runtime/base/frame_injection.h>
@@ -63,10 +63,10 @@
 
 #include <runtime/eval/runtime/file_repository.h>
 
-#include <runtime/vm/vm.h>
 #include <runtime/vm/runtime.h>
 #include <runtime/vm/repo.h>
 #include <runtime/vm/translator/translator.h>
+#include <compiler/builtin_symbols.h>
 
 using namespace boost::program_options;
 using std::cout;
@@ -77,6 +77,13 @@ extern char **environ;
 namespace HPHP {
 
 namespace VM { void initialize_repo(); }
+
+/*
+ * XXX: VM process initialization is handled through a function
+ * pointer so libhphp_runtime.a can be linked into programs that don't
+ * actually initialize the VM.
+ */
+void (*g_vmProcessInit)();
 
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
@@ -110,6 +117,7 @@ public:
   time_t startTime;
 };
 static StartTime s_startTime;
+static string tempFile;
 
 time_t start_time() {
   return s_startTime.startTime;
@@ -617,7 +625,32 @@ static int start_server(const std::string &username) {
   }
 #endif
 
+  // Create the HttpServer before any warmup requests to properly
+  // initialize the process
   HttpServer::Server = HttpServerPtr(new HttpServer(sslCTX));
+
+  // If we have any warmup requests, replay them before listening for
+  // real connections
+  for (auto& file : RuntimeOption::ServerWarmupRequests) {
+    HttpRequestHandler handler;
+    ReplayTransport rt;
+    timespec start;
+    gettime(CLOCK_MONOTONIC, &start);
+    std::string error;
+    Logger::Info("Replaying warmup request %s", file.c_str());
+    try {
+      rt.onRequestStart(start);
+      rt.replayInput(file);
+      handler.handleRequest(&rt);
+      Logger::Info("Finished successfully");
+    } catch (std::exception& e) {
+      error = e.what();
+    }
+    if (error.size()) {
+      Logger::Info("Got exception during warmup: %s", error.c_str());
+    }
+  }
+
   HttpServer::Server->run();
   return 0;
 }
@@ -667,10 +700,11 @@ static void prepare_args(int &argc, char **&argv, const StringVec &args,
 
 static int execute_program_impl(int argc, char **argv);
 int execute_program(int argc, char **argv) {
+  int ret_code = -1;
   try {
     if (hhvm) VM::initialize_repo();
     init_thread_locals();
-    return execute_program_impl(argc, argv);
+    ret_code = execute_program_impl(argc, argv);
   } catch (const Exception &e) {
     Logger::Error("Uncaught exception: %s", e.what());
   } catch (const std::exception &e) {
@@ -678,7 +712,10 @@ int execute_program(int argc, char **argv) {
   } catch (...) {
     Logger::Error("Uncaught exception: (unknown)");
   }
-  return -1;
+  if (tempFile.length() && boost::filesystem::exists(tempFile)) {
+    boost::filesystem::remove(tempFile);
+  }
+  return ret_code;
 }
 
 /* -1 - cannot open file
@@ -719,7 +756,7 @@ static void close_server_log_file(int kind) {
   } else if (kind == 2) {
     pclose(Logger::Output);
   } else {
-    assert(!Logger::Output);
+    always_assert(!Logger::Output);
   }
 }
 
@@ -735,7 +772,7 @@ static void set_execution_mode(string mode) {
     RuntimeOption::ExecutionMode = "";
   } else {
     // Undefined mode
-    assert(false);
+    always_assert(false);
   }
 }
 
@@ -951,6 +988,10 @@ static int execute_program_impl(int argc, char **argv) {
   ShmCounters::initialize(true, Logger::Error);
 
   if (!po.lint.empty()) {
+    if (po.isTempFile) {
+      tempFile = po.lint;
+    }
+
     hphp_process_init();
     try {
       HPHP::Eval::PhpFile* phpFile = g_vmContext->lookupPhpFile(
@@ -1003,6 +1044,10 @@ static int execute_program_impl(int argc, char **argv) {
   }
 
   if (argc <= 1 || po.mode == "run" || po.mode == "debug") {
+    if (po.isTempFile) {
+      tempFile = po.file;
+    }
+
     RuntimeOption::ExecutionMode = "cli";
 
     int new_argc;
@@ -1072,10 +1117,6 @@ static int execute_program_impl(int argc, char **argv) {
     free(new_argv);
     hphp_process_exit();
 
-    if (po.isTempFile && boost::filesystem::exists(po.file)) {
-      boost::filesystem::remove(po.file);
-    }
-
     return ret;
   }
 
@@ -1140,10 +1181,13 @@ void hphp_process_init() {
   ClassInfo::Load();
   Process::InitProcessStatics();
   init_static_variables();
-  init_literal_varstrings();
 
   if (hhvm) {
-    HPHP::VM::ProcessInit();
+    extern void sys_init_literal_varstrings();
+    sys_init_literal_varstrings();
+    g_vmProcessInit();
+  } else {
+    init_literal_varstrings();
   }
 
   PageletServer::Restart();

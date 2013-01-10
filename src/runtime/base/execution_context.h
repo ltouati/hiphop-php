@@ -474,6 +474,18 @@ private:
   void setHelperPost(unsigned ndiscard, TypedValue& tvRef,
                      TypedValue& tvRef2);
   bool cellInstanceOf(TypedValue* c, const HPHP::VM::NamedEntity* s);
+  bool initIterator(HPHP::VM::PC& pc, HPHP::VM::PC& origPc, HPHP::VM::Iter* it,
+                    HPHP::VM::Offset offset, HPHP::VM::Cell* c1);
+  bool initIteratorM(HPHP::VM::PC& pc, HPHP::VM::PC& origPc, HPHP::VM::Iter* it,
+                     HPHP::VM::Offset offset, HPHP::VM::Var* v1);
+  void storeIterValueC(HPHP::VM::Iter* it, TypedValue* tv1);
+  void storeIterValueV(HPHP::VM::Iter* it, TypedValue* tv1);
+  void storeIterKeyC(HPHP::VM::Iter* it, TypedValue* tv1);
+  void storeIterKeyV(HPHP::VM::Iter* it, TypedValue* tv1);
+  bool iterNext(HPHP::VM::PC& pc, HPHP::VM::PC& origPc, HPHP::VM::Iter* it,
+                HPHP::VM::Offset offset);
+  bool iterNextM(HPHP::VM::PC& pc, HPHP::VM::PC& origPc, HPHP::VM::Iter* it,
+                 HPHP::VM::Offset offset);
 #define O(name, imm, pusph, pop, flags)                                       \
   void iop##name(HPHP::VM::PC& pc);
 OPCODES
@@ -590,12 +602,12 @@ public:
   std::vector<HPHP::VM::Fault> m_faults;
 
   HPHP::VM::ActRec* getStackFrame();
-  ObjectData* getThis(bool skipFrame = false);
-  CStrRef getContextClassName(bool skipFrame = false);
-  CStrRef getParentContextClassName(bool skipFrame = false);
-  CStrRef getContainingFileName(bool skipFrame = false);
-  int getLine(bool skipFrame = false);
-  Array getCallerInfo(bool skipFrame = false);
+  ObjectData* getThis();
+  CStrRef getContextClassName();
+  CStrRef getParentContextClassName();
+  CStrRef getContainingFileName();
+  int getLine();
+  Array getCallerInfo();
   bool defined(CStrRef name);
   TypedValue* getCns(StringData* cns, bool system=true, bool dynamic=true);
   bool setCns(StringData* cns, CVarRef val, bool dynamic = false);
@@ -648,7 +660,7 @@ public:
                        bool withThis = false,
                        VMParserFrame* parserFrame = NULL);
   int handleUnwind(VM::UnwindStatus unwindType);
-  HPHP::VM::VarEnv* getVarEnv(bool skipBuiltin = true);
+  HPHP::VM::VarEnv* getVarEnv();
   void setVar(StringData* name, TypedValue* v, bool ref);
   Array getLocalDefinedVariables(int frame);
   HPHP::VM::InjectionTables* m_injTables;
@@ -672,6 +684,9 @@ private:
                  TypedValue* savedSP);
   void doFPushCuf(VM::PC& pc, bool forward, bool safe);
   void unwindBuiltinFrame();
+  template <bool forwarding>
+  void pushClsMethodImpl(VM::Class* cls, StringData* name,
+                         ObjectData* obj, int numArgs);
   template <bool reenter, bool handle_throw>
   bool prepareFuncEntry(VM::ActRec* ar,
                         VM::PC& pc,

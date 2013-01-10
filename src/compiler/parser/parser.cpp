@@ -118,6 +118,7 @@ extern void create_generator(Parser *_p, Token &out, Token &params,
                              Token *attr);
 extern void transform_yield(Parser *_p, Token &stmts, int index,
                             Token *expr, bool assign);
+extern void transform_yield_break(Parser *_p, Token &out);
 extern void transform_foreach(Parser *_p, Token &out, Token &arr, Token &name,
                               Token &value, Token &stmt, int count,
                               bool hasValue, bool byRef);
@@ -243,7 +244,7 @@ void Parser::newScope() {
 }
 
 void Parser::completeScope(BlockScopePtr inner) {
-  assert(inner);
+  always_assert(inner);
   BlockScopePtrVec &sv = m_scopes.back();
   for (int i = 0, n = sv.size(); i < n; i++) {
     BlockScopePtr scope = sv[i];
@@ -332,10 +333,13 @@ void Parser::onIndirectRef(Token &out, Token &refCount, Token &var) {
 void Parser::onStaticMember(Token &out, Token &cls, Token &name) {
   if (name->exp->is(Expression::KindOfArrayElementExpression) &&
       dynamic_pointer_cast<ArrayElementExpression>(name->exp)->
-      appendClass(cls->exp)) {
+      appendClass(cls->exp, m_ar, m_file)) {
     out->exp = name->exp;
   } else {
-    out->exp = NEW_EXP(StaticMemberExpression, cls->exp, name->exp);
+    StaticMemberExpressionPtr sme = NEW_EXP(StaticMemberExpression,
+                                            cls->exp, name->exp);
+    sme->onParse(m_ar, m_file);
+    out->exp = sme;
   }
 }
 
@@ -510,7 +514,9 @@ void Parser::encapArray(Token &out, Token &var, Token &expr) {
 // expressions
 
 void Parser::onConstantValue(Token &out, Token &constant) {
-  out->exp = NEW_EXP(ConstantExpression, constant->text());
+  ConstantExpressionPtr con = NEW_EXP(ConstantExpression, constant->text());
+  con->onParse(m_ar, m_file);
+  out->exp = con;
 }
 
 void Parser::onScalar(Token &out, int type, Token &scalar) {
@@ -619,8 +625,11 @@ void Parser::onAssignNew(Token &out, Token &var, Token &name, Token &args) {
 }
 
 void Parser::onNewObject(Token &out, Token &name, Token &args) {
-  out->exp = NEW_EXP(NewObjectExpression, name->exp,
-                     dynamic_pointer_cast<ExpressionList>(args->exp));
+  NewObjectExpressionPtr new_obj =
+    NEW_EXP(NewObjectExpression, name->exp,
+            dynamic_pointer_cast<ExpressionList>(args->exp));
+  new_obj->onParse(m_ar, m_file);
+  out->exp = new_obj;
 }
 
 void Parser::onUnaryOpExp(Token &out, Token &operand, int op, bool front) {
@@ -695,6 +704,26 @@ void Parser::onArrayPair(Token &out, Token *pairs, Token *name, Token &value,
   out->exp = expList;
 }
 
+void Parser::onEmptyCollection(Token &out) {
+  out->exp = NEW_EXP0(ExpressionList);
+}
+
+void
+Parser::onCollectionPair(Token &out, Token *pairs, Token *name, Token &value) {
+  if (!value->exp) return;
+
+  ExpressionPtr expList;
+  if (pairs && pairs->exp) {
+    expList = pairs->exp;
+  } else {
+    expList = NEW_EXP0(ExpressionList);
+  }
+  ExpressionPtr nameExp = name ? name->exp : ExpressionPtr();
+  expList->addElement(NEW_EXP(ArrayPairExpression, nameExp, value->exp, false,
+                              true));
+  out->exp = expList;
+}
+
 void Parser::onUserAttribute(Token &out, Token *attrList, Token &name,
                              Token &value) {
   ExpressionPtr expList;
@@ -711,7 +740,10 @@ void Parser::onClassConst(Token &out, Token &cls, Token &name, bool text) {
   if (!cls->exp) {
     cls->exp = NEW_EXP(ScalarExpression, T_STRING, cls->text());
   }
-  out->exp = NEW_EXP(ClassConstantExpression, cls->exp, name->text());
+  ClassConstantExpressionPtr con =
+    NEW_EXP(ClassConstantExpression, cls->exp, name->text());
+  con->onParse(m_ar, m_file);
+  out->exp = con;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -723,8 +755,7 @@ void Parser::onFunctionStart(Token &name, bool doPushComment /* = true */) {
     pushComment();
   }
   newScope();
-  m_generators.push_back(0);
-  m_foreaches.push_back(0);
+  m_funcContexts.push_back(FunctionContext());
   m_prependingStatements.push_back(vector<StatementPtr>());
   m_funcName = name.text();
   m_hasCallToGetArgs.push_back(false);
@@ -781,10 +812,11 @@ void Parser::onFunction(Token &out, Token &ret, Token &ref, Token &name,
   string comment = popComment();
   LocationPtr loc = popFuncLocation();
 
-  int yieldCount = m_generators.back();
-  m_generators.pop_back();
-  m_foreaches.pop_back();
+  FunctionContext funcContext = m_funcContexts.back();
+  m_funcContexts.pop_back();
   m_prependingStatements.pop_back();
+
+  funcContext.checkFinalAssertions();
 
   bool hasCallToGetArgs = m_hasCallToGetArgs.back();
   m_hasCallToGetArgs.pop_back();
@@ -793,12 +825,12 @@ void Parser::onFunction(Token &out, Token &ret, Token &ref, Token &name,
 
   FunctionStatementPtr func;
 
-  if (yieldCount > 0) {
+  if (funcContext.isGenerator) {
     AnonFuncKind fKind = name->text().empty() ?
       ContinuationFromClosure : Continuation;
     const string &closureName = getAnonFuncName(fKind);
     Token new_params;
-    prepare_generator(this, stmt, new_params, yieldCount);
+    prepare_generator(this, stmt, new_params, funcContext.numYields);
 
     func = NEW_STMT(FunctionStatement, ref->num(), closureName,
                     dynamic_pointer_cast<ExpressionList>(new_params->exp),
@@ -1086,10 +1118,11 @@ void Parser::onMethod(Token &out, Token &modifiers, Token &ret, Token &ref,
   string comment = popComment();
   LocationPtr loc = popFuncLocation();
 
-  int yieldCount = m_generators.back();
-  m_generators.pop_back();
-  m_foreaches.pop_back();
+  FunctionContext funcContext = m_funcContexts.back();
+  m_funcContexts.pop_back();
   m_prependingStatements.pop_back();
+
+  funcContext.checkFinalAssertions();
 
   bool hasCallToGetArgs = m_hasCallToGetArgs.back();
   m_hasCallToGetArgs.pop_back();
@@ -1097,10 +1130,10 @@ void Parser::onMethod(Token &out, Token &modifiers, Token &ret, Token &ref,
   fixStaticVars();
 
   MethodStatementPtr mth;
-  if (yieldCount > 0) {
+  if (funcContext.isGenerator) {
     const string &closureName = getAnonFuncName(ParserBase::Continuation);
     Token new_params;
-    prepare_generator(this, stmt, new_params, yieldCount);
+    prepare_generator(this, stmt, new_params, funcContext.numYields);
     ModifierExpressionPtr exp2 = Construct::Clone(exp);
     mth = NEW_STMT(MethodStatement, exp2, ref->num(), closureName,
                    dynamic_pointer_cast<ExpressionList>(new_params->exp),
@@ -1313,12 +1346,10 @@ void Parser::onContinue(Token &out, Token *expr) {
 
 void Parser::onReturn(Token &out, Token *expr, bool checkYield /* = true */) {
   out->stmt = NEW_STMT(ReturnStatement, expr ? expr->exp : ExpressionPtr());
-  if (checkYield && !m_generators.empty()) {
-    if (m_generators.back() > 0) {
+  if (checkYield && !m_funcContexts.empty()) {
+    if (!m_funcContexts.back().setIsNotGenerator()) {
       if (!hhvm) Compiler::Error(InvalidYield, out->stmt);
       PARSE_ERROR("Cannot mix 'return' and 'yield' in the same function");
-    } else {
-      m_generators.back() = -1;
     }
   }
 }
@@ -1332,28 +1363,31 @@ static void invalidYield(LocationPtr loc) {
   Compiler::Error(Compiler::InvalidYield, exp);
 }
 
-void Parser::onYield(Token &out, Token *expr, bool assign) {
+bool Parser::setIsGenerator() {
   if (!Option::EnableHipHopSyntax) {
     PARSE_ERROR("Yield is not enabled");
-    return;
-  }
-  if (m_generators.empty()) {
-    invalidYield(getLocation());
-    PARSE_ERROR("Yield can only be used inside a function");
-    return;
+    return false;
   }
 
-  if (m_generators.back() == -1) {
+  if (m_funcContexts.empty()) {
+    invalidYield(getLocation());
+    PARSE_ERROR("Yield can only be used inside a function");
+    return false;
+  }
+
+  if (!m_funcContexts.back().setIsGenerator()) {
     invalidYield(getLocation());
     PARSE_ERROR("Cannot mix 'return' and 'yield' in the same function");
-    return;
+    return false;
   }
+
   if (!m_clsName.empty()) {
     if (strcasecmp(m_funcName.c_str(), m_clsName.c_str()) == 0) {
       invalidYield(getLocation());
       PARSE_ERROR("'yield' is not allowed in potential constructors");
-      return;
+      return false;
     }
+
     if (m_funcName[0] == '_' && m_funcName[1] == '_') {
       const char *fname = m_funcName.c_str() + 2;
       if (!strcasecmp(fname, "construct") ||
@@ -1368,17 +1402,32 @@ void Parser::onYield(Token &out, Token *expr, bool assign) {
         invalidYield(getLocation());
         PARSE_ERROR("'yield' is not allowed in constructor, destructor, or "
                     "magic methods");
-        return;
+        return false;
       }
     }
   }
-  int index = ++m_generators.back();
 
-  Token stmts;
-  transform_yield(this, stmts, index, expr, assign);
+  return true;
+}
 
-  out.reset();
-  out->stmt = stmts->stmt;
+void Parser::onYield(Token &out, Token *expr, bool assign) {
+  if (!setIsGenerator()) {
+    return;
+  }
+
+  FunctionContext &funcContext = m_funcContexts.back();
+  std::fill(funcContext.foreachHasYield.begin(),
+            funcContext.foreachHasYield.end(), true);
+  int index = ++funcContext.numYields;
+  transform_yield(this, out, index, expr, assign);
+}
+
+void Parser::onYieldBreak(Token &out) {
+  if (!setIsGenerator()) {
+    return;
+  }
+
+  transform_yield_break(this, out);
 }
 
 void Parser::onGlobal(Token &out, Token &expr) {
@@ -1442,6 +1491,12 @@ void Parser::onExpStatement(Token &out, Token &expr) {
   exp->onParse(m_ar, m_file);
 }
 
+void Parser::onForEachStart() {
+  if (!m_funcContexts.empty()) {
+    m_funcContexts.back().foreachHasYield.push_back(false);
+  }
+}
+
 void Parser::onForEach(Token &out, Token &arr, Token &name, Token &value,
                        Token &stmt) {
   if (value->exp && name->num()) {
@@ -1450,12 +1505,16 @@ void Parser::onForEach(Token &out, Token &arr, Token &name, Token &value,
   }
   checkAssignThis(name);
   checkAssignThis(value);
-  if (!m_generators.empty() && m_generators.back() > 0) {
-    int cnt = ++m_foreaches.back();
-    // TODO only transform foreach with yield in its body.
-    transform_foreach(this, out, arr, name, value, stmt, cnt, value->exp,
-                      value->exp ? value->num() == 1 : name->num() == 1);
-    return;
+  if (!m_funcContexts.empty()) {
+    bool hasYield = m_funcContexts.back().foreachHasYield.back();
+    m_funcContexts.back().foreachHasYield.pop_back();
+
+    if (hasYield) {
+      int cnt = ++m_funcContexts.back().numForeaches;
+      transform_foreach(this, out, arr, name, value, stmt, cnt, value->exp,
+                        value->exp ? value->num() == 1 : name->num() == 1);
+      return;
+    }
   }
   if (stmt->stmt && stmt->stmt->is(Statement::KindOfStatementList)) {
     stmt->stmt = NEW_STMT(BlockStatement,

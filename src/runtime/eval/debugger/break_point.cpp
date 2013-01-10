@@ -21,7 +21,7 @@
 #include <runtime/base/preg.h>
 #include <runtime/base/execution_context.h>
 #include <runtime/base/class_info.h>
-#include <util/stat_cache.h>
+#include <runtime/base/stat_cache.h>
 #include <runtime/vm/translator/translator-inline.h>
 
 namespace HPHP { namespace Eval {
@@ -111,7 +111,7 @@ InterruptSiteVM::InterruptSiteVM(bool hardBreakPoint /* = false */,
   VM::ActRec *fp = context->getFP();
   bail_on(!fp);
   VM::Offset offset;
-  if (hardBreakPoint) {
+  if (hardBreakPoint && fp->skipFrame()) {
     // for hard breakpoint, the fp is for an extension function,
     // so we need to construct the site on the caller
     fp = context->getPrevVMState(fp, &offset);

@@ -123,7 +123,7 @@ String f_spl_object_hash(CObjRef obj) {
 
 Variant f_hphp_get_this() {
   if (hhvm) {
-    return g_vmContext->getThis(true);
+    return g_vmContext->getThis();
   } else {
     return FrameInjection::GetThis();
   }
@@ -141,7 +141,9 @@ Variant f_class_implements(CVarRef obj, bool autoload /* = true */) {
 
   const ClassInfo *info = ClassInfo::FindClassInterfaceOrTrait(clsname);
   if (info == NULL) {
-    return false;
+    if (!autoload) return false;
+    AutoloadHandler::s_instance->invokeHandler(clsname);
+    return f_class_implements(clsname, false);
   }
 
   Array ret(Array::Create());
@@ -166,7 +168,9 @@ Variant f_class_parents(CVarRef obj, bool autoload /* = true */) {
 
   const ClassInfo *info = ClassInfo::FindClassInterfaceOrTrait(clsname);
   if (info == NULL) {
-    return false;
+    if (!autoload) return false;
+    AutoloadHandler::s_instance->invokeHandler(clsname);
+    return f_class_parents(clsname, false);
   }
 
   Array ret(Array::Create());
@@ -191,7 +195,9 @@ Variant f_class_uses(CVarRef obj, bool autoload /* = true */) {
 
   const ClassInfo *info = ClassInfo::FindClassInterfaceOrTrait(clsname);
   if (!info) {
-    return false;
+    if (!autoload) return false;
+    AutoloadHandler::s_instance->invokeHandler(clsname);
+    return f_class_uses(clsname, false);
   }
 
   Array ret(Array::Create());
@@ -326,11 +332,11 @@ void f_spl_autoload(CStrRef class_name,
               ? s_extension_list->extensions
               : StringUtil::Explode(file_extensions, ",").toArray();
   String lClass = StringUtil::ToLower(class_name);
-  Globals *g = get_globals();
+  Globals *variables = hhvm ? nullptr : get_globals();
   bool found = false;
   for (ArrayIter iter(ext); iter; ++iter) {
     String fileName = lClass + iter.second();
-    include(fileName, true, g, "", false);
+    include(fileName, true, variables, "", false);
     if (f_class_exists(class_name, false)) {
       found = true;
       break;

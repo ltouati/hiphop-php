@@ -969,7 +969,7 @@ String fni_bin2hex(String const& str) {
   return f_bin2hex(str);
 }
 
-String fni_hex2bin(String const& str) {
+Variant fni_hex2bin(String const& str) {
   return f_hex2bin(str);
 }
 
@@ -1181,7 +1181,7 @@ Variant fni_strchr(String const& haystack, Variant const& needle) {
   return f_strchr(haystack, needle);
 }
 
-int64 fni_strlen(String const& str) {
+Variant fni_strlen(CVarRef str) {
   return f_strlen(str);
 }
 

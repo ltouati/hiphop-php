@@ -44,6 +44,7 @@ void FixedStringMap<V, case_sensitive>::init(int num) {
     capac *= 2;
   }
   TRACE(1, "FixedStringMap::init: %d -> %d\n", num, capac);
+  ASSERT(!m_table);
   m_table = (Elm*)calloc(capac * sizeof(Elm), 1);
   ASSERT(m_table);
   m_mask = capac - 1;
@@ -66,7 +67,6 @@ void FixedStringMap<V, case_sensitive>::add(const StringData* sd, const V& v) {
 }
 
 template <typename V, bool case_sensitive>
-HOT_FUNC_VM
 V* FixedStringMap<V, case_sensitive>::find(const StringData* sd) const {
   Elm* elm = &m_table[sd->hash() & m_mask];
   UNUSED unsigned numProbes = 0;
@@ -83,6 +83,7 @@ template class FixedStringMap<Slot, true>;
 template class FixedStringMap<Id, false>;
 template class FixedStringMap<Id, true>;
 template class FixedStringMap<Func*, false>;
+template class FixedStringMap<unsigned char* /* TCA */, true>;
 
 ///////////////////////////////////////////////////////////////////////////////
 

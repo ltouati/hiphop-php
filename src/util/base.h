@@ -14,8 +14,8 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef __BASE_H__
-#define __BASE_H__
+#ifndef incl_HPHP_BASE_H_
+#define incl_HPHP_BASE_H_
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,7 +65,7 @@
 #include <boost/numeric/conversion/cast.hpp>
 
 #include "util/hash.h"
-#include "util/assert.h"
+#include "util/assertions.h"
 
 #ifdef __INTEL_COMPILER
 #define va_copy __builtin_va_copy
@@ -564,7 +564,14 @@ template<class T, size_t Sz>
 size_t array_size(T (&t)[Sz]) {
   return Sz;
 }
+
+template<typename Out, typename In>
+Out& readData(In*& it) {
+  Out& r = *(Out*)it;
+  (char*&)it += sizeof(Out);
+  return r;
 }
+} // namespace HPHP
 
 namespace boost {
 
@@ -592,4 +599,4 @@ namespace HPHP {
   using boost::static_pointer_cast;
 }
 
-#endif // __BASE_H__
+#endif

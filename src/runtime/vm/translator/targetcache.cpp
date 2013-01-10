@@ -23,7 +23,6 @@
 #include <runtime/base/complex_types.h>
 #include <runtime/base/execution_context.h>
 #include <runtime/base/types.h>
-#include <runtime/base/tv_macros.h>
 #include <runtime/base/strings.h>
 #include <runtime/vm/unit.h>
 #include <runtime/vm/class.h>
@@ -200,11 +199,11 @@ size_t allocCnsBit(const StringData* name) {
   return allocBitImpl(name, NSCnsBits);
 }
 
-Handle bitOffToHandleAndMask(size_t bit, uint32 &mask) {
-  CT_ASSERT(!(32 % CHAR_BIT));
-  mask = (uint32)1 << (bit % 32);
+Handle bitOffToHandleAndMask(size_t bit, uint8 &mask) {
+  CT_ASSERT(!(8 % CHAR_BIT));
+  mask = (uint8)1 << (bit % 8);
   size_t off = bit / CHAR_BIT;
-  off -= off % (32 / CHAR_BIT);
+  off -= off % (8 / CHAR_BIT);
   return off;
 }
 
@@ -247,7 +246,7 @@ static Handle allocLocked(bool persistent, int numBytes, int align) {
   frontier &= ~(align - 1);
   frontier += numBytes;
 
-  assert(frontier < (persistent ?
+  always_assert(frontier < (persistent ?
                      RuntimeOption::EvalJitTargetCacheSize :
                      s_persistent_start));
 
@@ -314,7 +313,7 @@ void initPersistentCache() {
   if (s_tc_fd) return;
   char tmpName[] = "/tmp/tcXXXXXX";
   s_tc_fd = mkstemp(tmpName);
-  assert(s_tc_fd != -1);
+  always_assert(s_tc_fd != -1);
   unlink(tmpName);
   s_persistent_start = RuntimeOption::EvalJitTargetCacheSize * 3 / 4;
   s_persistent_start -= s_persistent_start & (4 * 1024 - 1);
@@ -330,7 +329,7 @@ void threadInit() {
 
   tl_targetCaches = mmap(NULL, RuntimeOption::EvalJitTargetCacheSize,
                          PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-  assert(tl_targetCaches != MAP_FAILED);
+  always_assert(tl_targetCaches != MAP_FAILED);
   hintHuge(tl_targetCaches, RuntimeOption::EvalJitTargetCacheSize);
 
   void *shared_base = (char*)tl_targetCaches + s_persistent_start;
@@ -342,7 +341,7 @@ void threadInit() {
   void *mem = mmap(shared_base,
                    RuntimeOption::EvalJitTargetCacheSize - s_persistent_start,
                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_tc_fd, 0);
-  assert(mem == shared_base);
+  always_assert(mem == shared_base);
 }
 
 void threadExit() {
@@ -407,17 +406,18 @@ FuncCache::lookup(Handle handle, StringData *sd, const void* /* ignored */) {
     // Miss. Does it actually exist?
     func = Unit::lookupFunc(sd);
     if (UNLIKELY(!func)) {
-      undefinedError("Undefined function: %s", sd->data());
+      VMRegAnchor _;
+      func = Unit::loadFunc(sd);
+      if (!func) {
+        undefinedError("Undefined function: %s", sd->data());
+      }
     }
     func->validate();
     pair->m_key = func->name(); // use a static name
     pair->m_value = func;
   }
-  // DecRef the string here; more compact than doing so in
-  // callers.
-  if (sd->decRefCount() == 0) {
-    sd->release();
-  }
+  // DecRef the string here; more compact than doing so in callers.
+  decRefStr(sd);
   ASSERT(stringMatches(pair->m_key, pair->m_value->name()));
   pair->m_value->validate();
   return pair->m_value;
@@ -426,8 +426,13 @@ FuncCache::lookup(Handle handle, StringData *sd, const void* /* ignored */) {
 //=============================================================================
 // FixedFuncCache
 
-void FixedFuncCache::lookupFailed(StringData* name) {
-  undefinedError("Undefined function: %s", name->data());
+const Func* FixedFuncCache::lookupUnknownFunc(StringData* name) {
+  VMRegAnchor _;
+  Func* func = Unit::loadFunc(name);
+  if (UNLIKELY(!func)) {
+    undefinedError("Undefined function: %s", name->data());
+  }
+  return func;
 }
 
 //=============================================================================
@@ -435,73 +440,109 @@ void FixedFuncCache::lookupFailed(StringData* name) {
 
 template<>
 inline int
-MethodCache::hashKey(const Class* c) {
+MethodCache::hashKey(uintptr_t c) {
   pointer_hash<Class> h;
-  return h(c);
+  return h(reinterpret_cast<const Class*>(c));
+}
+
+/*
+ * This is flagged NEVER_INLINE because if gcc inlines it, it will
+ * hoist a bunch of initialization code (callee-saved regs pushes,
+ * making a frame, and rsp adjustment) above the fast path.  When not
+ * inlined, gcc is generating a jmp to this function instead of a
+ * call.
+ */
+HOT_FUNC_VM NEVER_INLINE
+static void methodCacheSlowPath(MethodCache::Pair* mce,
+                                ActRec* ar,
+                                StringData* name,
+                                Class* cls) {
+  ASSERT(ar->hasThis());
+  ASSERT(ar->getThis()->getVMClass() == cls);
+  ASSERT(IMPLIES(mce->m_key, mce->m_value));
+
+  bool isMagicCall = mce->m_key & 0x1u;
+  bool isStatic;
+  const Func* func;
+
+  auto* storedClass = reinterpret_cast<Class*>(mce->m_key & ~0x3u);
+  if (storedClass == cls) {
+    isStatic = mce->m_key & 0x2u;
+    func = mce->m_value;
+  } else {
+    if (LIKELY(storedClass != NULL &&
+               ((func = cls->wouldCall(mce->m_value)) != NULL) &&
+               !isMagicCall)) {
+      Stats::inc(Stats::TgtCache_MethodHit, func != NULL);
+      isMagicCall = false;
+    } else {
+      Class* ctx = arGetContextClass((ActRec*)ar->m_savedRbp);
+      Stats::inc(Stats::TgtCache_MethodMiss);
+      TRACE(2, "MethodCache: miss class %p name %s!\n", cls, name->data());
+      func = g_vmContext->lookupMethodCtx(cls, name, ctx,
+        MethodLookup::ObjMethod, false);
+      if (UNLIKELY(!func)) {
+        isMagicCall = true;
+        func = cls->lookupMethod(s___call.get());
+        if (UNLIKELY(!func)) {
+          // Do it again, but raise the error this time.
+          (void) g_vmContext->lookupMethodCtx(cls, name, ctx,
+                    MethodLookup::ObjMethod, true);
+          NOT_REACHED();
+        }
+      } else {
+        isMagicCall = false;
+      }
+    }
+
+    isStatic = func->attrs() & AttrStatic;
+
+    mce->m_key = uintptr_t(cls) | (uintptr_t(isStatic) << 1) |
+                 uintptr_t(isMagicCall);
+    mce->m_value = func;
+  }
+
+  ASSERT(func);
+  func->validate();
+  ar->m_func = func;
+
+  if (UNLIKELY(isStatic)) {
+    decRefObj(ar->getThis());
+    if (debug) ar->setThis(NULL); // suppress ASSERT in setClass
+    ar->setClass(cls);
+  }
+
+  ASSERT(!ar->hasVarEnv() && !ar->hasInvName());
+  if (UNLIKELY(isMagicCall)) {
+    ar->setInvName(name);
+    ASSERT(name->isStatic()); // No incRef needed.
+  }
 }
 
 template<>
 HOT_FUNC_VM
 void
-MethodCache::lookup(Handle handle, ActRec *ar, const void* extraKey) {
-  StringData* name = (StringData*)extraKey;
+MethodCache::lookup(Handle handle, ActRec* ar, const void* extraKey) {
   ASSERT(ar->hasThis());
-  ObjectData* obj = ar->getThis();
-  Class* c = obj->getVMClass();
-  ASSERT(c);
-  MethodCache* thiz = MethodCache::cacheAtHandle(handle);
-  Pair* pair = thiz->keyToPair(c);
-  const Func* func = NULL;
-  bool isMagicCall = false;
-  bool isStatic = false;
-  if (LIKELY(pair->m_key == c)) {
-    func = pair->m_value.getFunc();
-    ASSERT(func);
-    isMagicCall = pair->m_value.isMagicCall();
-    isStatic = pair->m_value.isStatic();
-    Stats::inc(Stats::TgtCache_MethodHit);
-  } else {
-    ASSERT(IMPLIES(pair->m_key, pair->m_value.getFunc()));
-    if (LIKELY(pair->m_key != NULL) &&
-        LIKELY((func = c->wouldCall(pair->m_value.getFunc())) != NULL) &&
-        LIKELY(!pair->m_value.isMagicCall())) {
-      Stats::inc(Stats::TgtCache_MethodHit, func != NULL);
-    } else {
-      Class* ctx = arGetContextClass((ActRec*)ar->m_savedRbp);
-      Stats::inc(Stats::TgtCache_MethodMiss);
-      TRACE(2, "MethodCache: miss class %p name %s!\n", c, name->data());
-      func = g_vmContext->lookupMethodCtx(c, name, ctx, ObjMethod, false);
-      if (UNLIKELY(!func)) {
-        isMagicCall = true;
-        func = c->lookupMethod(s___call.get());
-        if (UNLIKELY(!func)) {
-          // Do it again, but raise the error this time.
-          (void) g_vmContext->lookupMethodCtx(c, name, ctx, ObjMethod, true);
-          NOT_REACHED();
-        }
-      }
-    }
-    isStatic = func->attrs() & AttrStatic;
-    pair->m_value.set(func, isMagicCall, isStatic);
-    pair->m_key = c;
-  }
-  ASSERT(func);
-  func->validate();
+  auto* cls = ar->getThis()->getVMClass();
+  auto* pair = MethodCache::cacheAtHandle(handle)->keyToPair(uintptr_t(cls));
 
-  ar->m_func = func;
-  if (UNLIKELY(isStatic)) {
-    // Drop the ActRec's reference to the current instance
-    if (obj->decRefCount() == 0) {
-      obj->release();
-    }
-    if (debug) ar->setThis(NULL); // suppress ASSERT in setClass
-    // Set the ActRec's class (needed for late static binding)
-    ar->setClass(c);
-  }
-  ASSERT(!ar->hasVarEnv() && !ar->hasInvName());
-  if (UNLIKELY(isMagicCall)) {
-    ar->setInvName(name);
-    name->incRefCount();
+  /*
+   * The MethodCache line consists of a Class* key (stored as a
+   * uintptr_t) and a Func*.  The low bit of the key is set if the
+   * function call is a magic call (in which case the cached Func* is
+   * the __call function).  The second lowest bit of the key is set if
+   * the cached Func has AttrStatic.
+   *
+   * For this fast path, we just check if the key is bitwise equal to
+   * the Class* on the object.  If either of the special bits are set
+   * in the key we'll bail to the slow path.
+   */
+  if (LIKELY(pair->m_key == reinterpret_cast<uintptr_t>(cls))) {
+    ar->m_func = pair->m_value;
+  } else {
+    auto* name = static_cast<const StringData*>(extraKey);
+    methodCacheSlowPath(pair, ar, const_cast<StringData*>(name), cls);
   }
 }
 
@@ -539,7 +580,7 @@ GlobalCache::lookupImpl(StringData *name, bool allowCreate) {
       retval = 0;
       goto miss;
     } else {
-      TV_WRITE_NULL(retval);
+      tvWriteNull(retval);
     }
   }
   if (isBoxed && retval->m_type != KindOfRef) {
@@ -555,7 +596,7 @@ miss:
   // decRef the name if we consumed it.  If we didn't get a global, we
   // need to leave the name for the caller to use before decrefing (to
   // emit warnings).
-  if (retval && name->decRefCount() == 0) { name->release(); }
+  if (retval) decRefStr(name);
   TRACE(5, "%sGlobalCache::lookup(\"%s\") tv@%p %p -> (%s) %p t%d\n",
         isBoxed ? "Boxed" : "",
         name->data(),
@@ -709,10 +750,7 @@ ClassCache::lookup(Handle handle, StringData *name,
         undefinedError(Strings::UNKNOWN_CLASS, name->data());
       }
     }
-    if (pair->m_key &&
-        pair->m_key->decRefCount() == 0) {
-      pair->m_key->release();
-    }
+    if (pair->m_key) decRefStr(pair->m_key);
     pair->m_key = name;
     name->incRefCount();
     pair->m_value = c;
@@ -889,8 +927,8 @@ PropCacheBase<Key, ns>::lookup(CacheHandle handle, ObjectData* base,
   if (decRefBase) {
     if (refToFree) {
       tvDecRefRefInternal(refToFree);
-    } else if (base->decRefCount() == 0) {
-      base->release();
+    } else {
+      decRefObj(base);
     }
   }
 }
@@ -937,9 +975,7 @@ PropCacheBase<Key, ns>::set(CacheHandle ch, ObjectData* base, StringData* name,
     }
   }
 
-  if (decRefBase && base->decRefCount() == 0) {
-    base->release();
-  }
+  if (decRefBase) decRefObj(base);
 }
 
 /*
@@ -1199,6 +1235,7 @@ StaticMethodFCache::lookup(Handle handle, const Class* cls,
     thiz->m_static = f->isStatic();
     TRACE(1, "fill staticfcache %s :: %s -> %p\n",
           cls->name()->data(), methName->data(), f);
+    Stats::inc(Stats::TgtCache_StaticMethodFFill);
     return f;
   }
 

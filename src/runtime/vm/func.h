@@ -40,7 +40,7 @@ struct Func {
   struct ParamInfo { // Parameter default value info.
     // construct a dummy ParamInfo
     ParamInfo() : m_funcletOff(InvalidAbsoluteOffset), m_phpCode(NULL) {
-      TV_WRITE_UNINIT(&m_defVal);
+      tvWriteUninit(&m_defVal);
     }
 
     template<class SerDe>
@@ -48,7 +48,8 @@ struct Func {
       const StringData* tcName = m_typeConstraint.typeName();
       bool tcNullable          = m_typeConstraint.nullable();
 
-      sd(m_funcletOff)
+      sd(m_builtinType)
+        (m_funcletOff)
         (m_defVal)
         (m_phpCode)
         (tcName)
@@ -61,6 +62,9 @@ struct Func {
                                          tcNullable));
       }
     }
+
+    void setBuiltinType(DataType type) { m_builtinType = type; }
+    DataType builtinType() const { return m_builtinType; }
 
     void setFuncletOff(Offset funcletOff) { m_funcletOff = funcletOff; }
     Offset funcletOff() const { return m_funcletOff; }
@@ -94,6 +98,7 @@ struct Func {
     }
 
   private:
+    DataType m_builtinType;     // typehint for builtins
     Offset m_funcletOff; // If no default: InvalidAbsoluteOffset.
     TypedValue m_defVal; // Set to uninit null if there is no default value
                          // or if there is a non-scalar default value.
@@ -109,7 +114,7 @@ struct Func {
     template<class SerDe> void serde(SerDe& sd) { sd(name)(phpCode); }
   };
 
-  typedef std::vector<ParamInfo> ParamInfoVec;
+  typedef FixedVector<ParamInfo> ParamInfoVec;
   typedef FixedVector<SVInfo> SVInfoVec;
   typedef FixedVector<EHEnt> EHEntVec;
   typedef FixedVector<FPIEnt> FPIEntVec;
@@ -118,12 +123,12 @@ struct Func {
   static const FuncId InvalidId = -1LL;
 
   Func(Unit& unit, Id id, int line1, int line2, Offset base,
-      Offset past, const StringData* name, Attr attrs, bool top,
-      const StringData* docComment, int numParams);
+       Offset past, const StringData* name, Attr attrs, bool top,
+       const StringData* docComment, int numParams, bool isGenerator);
   Func(Unit& unit, PreClass* preClass, int line1,
-      int line2, Offset base, Offset past,
-      const StringData* name, Attr attrs, bool top,
-      const StringData* docComment, int numParams);
+       int line2, Offset base, Offset past,
+       const StringData* name, Attr attrs, bool top,
+       const StringData* docComment, int numParams, bool isGenerator);
   ~Func();
   static void destroy(Func* func);
 
@@ -234,6 +239,7 @@ struct Func {
   Offset past() const { return shared()->m_past; }
   int line1() const { return shared()->m_line1; }
   int line2() const { return shared()->m_line2; }
+  DataType returnType() const { return shared()->m_returnType; }
   const SVInfoVec& staticVars() const { return shared()->m_staticVars; }
   const StringData* name() const {
     ASSERT(m_name != NULL);
@@ -304,6 +310,9 @@ struct Func {
     return shared()->m_info &&
     (shared()->m_info->attribute & ClassInfo::IgnoreRedefinition);
   }
+  const BuiltinFunction& nativeFuncPtr() const {
+    return shared()->m_nativeFuncPtr;
+  }
   const BuiltinFunction& builtinFuncPtr() const {
     return shared()->m_builtinFuncPtr;
   }
@@ -338,7 +347,7 @@ struct Func {
   void resetPrologues() {
     // Useful when killing code; forget what we've learned about the contents
     // of the translation cache.
-    initPrologues(m_numParams);
+    initPrologues(m_numParams, isGenerator());
   }
 
   const NamedEntity* getNamedEntity() const {
@@ -369,12 +378,13 @@ public: // Offset accessors for the translator.
   X(prologueTable);
   X(maybeIntercepted);
   X(maxStackCells);
+  X(funcBody);
 #undef X
 
 private:
   typedef IndexedStringMap<const StringData*,true,Id> NamedLocalsMap;
 
-  struct SharedData : public Countable {
+  struct SharedData : public AtomicCountable {
     PreClass* m_preClass;
     Id m_id;
     Offset m_base;
@@ -383,9 +393,11 @@ private:
     Offset m_past;
     int m_line1;
     int m_line2;
+    DataType m_returnType;
     const ClassInfo::MethodInfo* m_info; // For builtins.
     uint64_t* m_refBitVec;
     BuiltinFunction m_builtinFuncPtr;
+    BuiltinFunction m_nativeFuncPtr;
     ParamInfoVec m_params; // m_params[i] corresponds to parameter i.
     NamedLocalsMap m_localNames; // includes parameter names
     SVInfoVec m_staticVars;
@@ -401,9 +413,9 @@ private:
         Offset past, int line1, int line2, bool top,
         const StringData* docComment);
     ~SharedData();
-    void release();
+    void atomicRelease();
   };
-  typedef SmartPtr<SharedData> SharedDataPtr;
+  typedef AtomicSmartPtr<SharedData> SharedDataPtr;
 
   static const int kBitsPerQword = 64;
   static const StringData* s___call;
@@ -412,9 +424,10 @@ private:
 
 private:
   void setFullName();
-  void init(int numParams);
-  void initPrologues(int numParams);
-  void appendParam(bool ref, const ParamInfo& info);
+  void init(int numParams, bool isGenerator);
+  void initPrologues(int numParams, bool isGenerator);
+  void appendParam(bool ref, const ParamInfo& info,
+                   std::vector<ParamInfo>& pBuilder);
   void allocVarId(const StringData* name);
   const SharedData* shared() const { return m_shared.get(); }
   SharedData* shared() { return m_shared.get(); }
@@ -452,9 +465,7 @@ private:
                                  // method
   // TODO(#1114385) intercept should work via invalidation.
   mutable char m_maybeIntercepted; // -1, 0, or 1.  Accessed atomically.
-public:
   unsigned char* volatile m_funcBody;  // Accessed from assembly.
-private:
   // This must be the last field declared in this structure
   // and the Func class should not be inherited from.
   unsigned char* volatile m_prologueTable[kNumFixedPrologues];
@@ -561,7 +572,7 @@ public:
   Func* create(Unit& unit, PreClass* preClass = NULL) const;
 
   void setBuiltinFunc(const ClassInfo::MethodInfo* info,
-      BuiltinFunction funcPtr, Offset base);
+      BuiltinFunction bif, BuiltinFunction nif, Offset base);
 
 private:
   void sortEHTab();
@@ -591,6 +602,7 @@ private:
   FPIEntVec m_fpitab;
 
   Attr m_attrs;
+  DataType m_returnType;
   bool m_top;
   const StringData* m_docComment;
   bool m_isClosureBody;
@@ -601,6 +613,7 @@ private:
 
   const ClassInfo::MethodInfo* m_info;
   BuiltinFunction m_builtinFuncPtr;
+  BuiltinFunction m_nativeFuncPtr;
 };
 
 class FuncRepoProxy : public RepoProxy {

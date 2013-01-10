@@ -2832,7 +2832,7 @@ static Variant php_imagettftext_common(int mode, int extended,
 #endif
 
 #if !HAVE_GD_STRINGFTEX
-  assert(!extended);
+  always_assert(!extended);
 #endif
 
   if (mode == TTFTEXT_BBOX) {
@@ -6057,7 +6057,7 @@ static int exif_process_user_comment(image_info_type *ImageInfo,
 
 #if EXIF_USE_MBSTRING
   char  *decode;
-  size_t len;;
+  size_t len;
 #endif
 
   *pszEncoding = NULL;

@@ -26,6 +26,13 @@ using namespace HPHP::VM::Transl;
 
 TRACE_SET_MOD(stats);
 
+const char* g_counterNames[] = {
+#include "runtime/vm/stats-opcodeDef.h"
+#define STAT(s) #s ,
+  STATS
+#undef STAT
+#undef O
+};
 __thread uint64_t tl_counters[kNumStatCounters];
 __thread uint64_t tl_helper_counters[kMaxNumTrampolines];
 
@@ -40,17 +47,20 @@ emitInc(X64Assembler& a, uint64_t* tl_table, uint index, int n,
         ConditionCode cc) {
   bool havecc = cc != CC_None;
   uintptr_t virtualAddress = uintptr_t(&tl_table[index]) - tlsBase();
+
   TCA jcc = NULL;
   if (havecc) {
     jcc = a.code.frontier;
-    a.  jcc8(ccNegate(cc), jcc);
-    a.  pushf();
+    a.  jcc8  (ccNegate(cc), jcc);
   }
-  emitImmReg(a, virtualAddress, reg::rScratch);
+  a.    pushf ();
+  a.    push  (reg::rScratch);
+  a.    movq  (virtualAddress, reg::rScratch);
   a.    fs();
-  a.    add_imm64_disp_reg64(n, 0, reg::rScratch);
+  a.    addq  (n, *reg::rScratch);
+  a.    pop   (reg::rScratch);
+  a.    popf  ();
   if (havecc) {
-    a.  popf();
     a.  patchJcc8(jcc, a.code.frontier);
   }
 }

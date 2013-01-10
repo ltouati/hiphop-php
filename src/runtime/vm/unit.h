@@ -31,6 +31,7 @@
 #include "util/tiny_vector.h"
 
 namespace HPHP {
+namespace Compiler { class Peephole; }
 namespace VM {
 
 // Forward declarations.
@@ -322,6 +323,7 @@ struct Unit {
       GuardedCls,
       NoSurprise,
       ArrayCapacity,
+      IteratorType,
 
       /*
        * Information about the known class of a property base in the
@@ -334,7 +336,14 @@ struct Unit {
        * Whatever the base is when processing that member code will be
        * an object of the supplied class type (or a null).
        */
-      MVecPropClass
+      MVecPropClass,
+
+      /*
+       * At a Ret{C,V} site, indicates which locals are known not to
+       * be reference counted.  m_data is the id of the local variable
+       * that cannot be reference counted at this point.
+       */
+      NonRefCounted,
     };
 
     /*
@@ -466,8 +475,9 @@ struct Unit {
   }
 
   static Func *lookupFunc(const NamedEntity *ne, const StringData* name);
-
   static Func *lookupFunc(const StringData *funcName);
+  static Func *loadFunc(const NamedEntity *ne, const StringData* name);
+  static Func *loadFunc(const StringData* name);
 
   static Class* defClass(const HPHP::VM::PreClass* preClass,
                          bool failIsFatal = true);
@@ -638,8 +648,8 @@ private:
 };
 
 class UnitEmitter {
-  friend class Peephole;
   friend class UnitRepoProxy;
+  friend class ::HPHP::Compiler::Peephole;
  public:
   UnitEmitter(const MD5& md5);
   ~UnitEmitter();
@@ -723,11 +733,13 @@ class UnitEmitter {
   Func* newFunc(const FuncEmitter* fe, Unit& unit, Id id, int line1, int line2,
                 Offset base, Offset past,
                 const StringData* name, Attr attrs, bool top,
-                const StringData* docComment, int numParams);
+                const StringData* docComment, int numParams,
+                bool isGenerator);
   Func* newFunc(const FuncEmitter* fe, Unit& unit, PreClass* preClass,
                 int line1, int line2, Offset base, Offset past,
                 const StringData* name, Attr attrs, bool top,
-                const StringData* docComment, int numParams);
+                const StringData* docComment, int numParams,
+                bool isGenerator);
   Unit* create();
   void returnSeen() { m_returnSeen = true; }
   void pushMergeableClass(PreClassEmitter* e);
@@ -1003,6 +1015,8 @@ typedef AllFuncsImpl<Unit::MutableFuncRange, MutablePreClassMethodRanger> Mutabl
 class AllClasses {
 protected:
   NamedEntityMap::iterator m_next, m_end;
+  Class* m_current;
+  void next();
   void skip();
 public:
   AllClasses();
@@ -1010,12 +1024,6 @@ public:
   Class* front() const;
   Class* popFront();
 };
-
-/*
- * hphp_compiler_parse() is defined in the compiler, but we must use
- * dlsym() to get at it. CompileStringFn matches its signature.
- */
-typedef Unit*(*CompileStringFn)(const char*, int, const MD5&, const char*);
 
 } } // HPHP::VM
 #endif

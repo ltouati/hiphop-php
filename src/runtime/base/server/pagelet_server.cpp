@@ -18,6 +18,7 @@
 #include <runtime/base/server/transport.h>
 #include <runtime/base/server/http_request_handler.h>
 #include <runtime/base/server/upload.h>
+#include <runtime/base/server/job_queue_vm_stack.h>
 #include <runtime/base/util/string_buffer.h>
 #include <runtime/base/runtime_option.h>
 #include <runtime/base/resource_data.h>
@@ -114,8 +115,7 @@ public:
     m_responseHeaders.erase(name);
   }
   virtual void sendImpl(const void *data, int size, int code,
-                        bool compressed) {
-    ASSERT(!compressed);
+                        bool chunked) {
     m_response.append((const char*)data, size);
     if (code) {
       m_code = code;
@@ -158,14 +158,27 @@ public:
     return m_pipeline.empty();
   }
 
-  String getResults(Array &headers, int &code) {
+  String getResults(Array &headers, int &code, int64 timeout_ms) {
     {
       Lock lock(this);
-      while (!m_done && m_pipeline.empty()) wait();
+      while (!m_done && m_pipeline.empty()) {
+        if (timeout_ms > 0) {
+          long seconds = timeout_ms / 1000;
+          long long nanosecs = (timeout_ms % 1000) * 1000000;
+          if (!wait(seconds, nanosecs)) {
+            code = -1;
+            return "";
+          }
+        } else {
+          wait();
+        }
+      }
+
       if (!m_pipeline.empty()) {
         // intermediate results do not have headers and code
         string ret = m_pipeline.front();
         m_pipeline.pop_front();
+        code = 0;
         return ret;
       }
     }
@@ -219,8 +232,9 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class PageletWorker : public JobQueueWorker<PageletTransport*> {
-public:
+struct PageletWorker
+  : JobQueueWorker<PageletTransport*,false,false,JobQueueDropVMStack>
+{
   virtual void doJob(PageletTransport *job) {
     try {
       job->onRequestStart(job->getStartTimer());
@@ -325,9 +339,10 @@ int64 PageletServer::TaskStatus(CObjRef task) {
   return PAGELET_NOT_READY;
 }
 
-String PageletServer::TaskResult(CObjRef task, Array &headers, int &code) {
+String PageletServer::TaskResult(CObjRef task, Array &headers, int &code,
+                                 int64 timeout_ms) {
   PageletTask *ptask = task.getTyped<PageletTask>();
-  return ptask->getJob()->getResults(headers, code);
+  return ptask->getJob()->getResults(headers, code, timeout_ms);
 }
 
 void PageletServer::AddToPipeline(const string &s) {

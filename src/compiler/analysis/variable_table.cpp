@@ -545,7 +545,7 @@ Symbol *VariableTable::findProperty(ClassScopePtr &cls,
 TypePtr VariableTable::checkProperty(BlockScopeRawPtr context,
                                      Symbol *sym, TypePtr type,
                                      bool coerce, AnalysisResultConstPtr ar) {
-  assert(sym->isPresent());
+  always_assert(sym->isPresent());
   if (sym->isOverride()) {
     Symbol *base;
     ClassScopePtr parent = findParent(ar, sym->getName(), base);
@@ -839,12 +839,12 @@ void VariableTable::checkSystemGVOrder(SymbolSet &variants,
     "gvm_argv",
     "gvm_http_response_header",
   };
-  assert(variants.size() >= max &&
+  always_assert(variants.size() >= max &&
          sizeof(sgvNames) / sizeof(sgvNames[0]) == max);
   unsigned int i = 0;
   for (SymbolSet::const_iterator iterName = variants.begin();
        iterName != variants.end(); ++iterName) {
-    assert(!strcmp(sgvNames[i], iterName->c_str()));
+    always_assert(!strcmp(sgvNames[i], iterName->c_str()));
     i++;
   }
 }
@@ -999,7 +999,7 @@ void VariableTable::outputCPPGlobalVariablesHeader(CodeGenerator &cg,
       if (!gvmPrefix) {
         gvmDone = true;
       } else {
-        assert(!gvmDone);
+        always_assert(!gvmDone);
       }
       string cast;
       if (type == object) {
@@ -1322,7 +1322,7 @@ void VariableTable::outputCPPGVHashTableGetImpl(CodeGenerator &cg,
               i);
   }
   cg_printf(text2, tableSize - 1, tableSize - 1, tableSize - 1);
-  cg_printf(text3);
+  cg_print(text3);
   cg.ifdefEnd("OMIT_JUMP_TABLE_GLOBAL_GETIMPL");
 }
 
@@ -1335,15 +1335,14 @@ void VariableTable::outputCPPGVHashTableExists(CodeGenerator &cg,
                                                AnalysisResultPtr ar) {
   ASSERT(cg.getCurrentIndentation() == 0);
   cg.ifdefBegin(false, "OMIT_JUMP_TABLE_GLOBAL_EXISTS");
-  const char text[] =
+  cg_printf(
     "HOT_FUNC_HPHP\n"
     "bool GlobalVariables::exists(CStrRef s) const {\n"
     "  const hashNodeGV *p = findGV(s.data(), s.size(), s->hash());\n"
     "  if (p) return isInitialized(*(Variant *)((char *)this + p->off));\n"
     "  if (!LVariableTable::exists(s)) return false;\n"
     "  return isInitialized(const_cast<GlobalVariables*>(this)->get(s));\n"
-    "}\n";
-  cg_printf(text);
+    "}\n");
   cg.ifdefEnd("OMIT_JUMP_TABLE_GLOBAL_EXISTS");
 }
 
@@ -1382,7 +1381,7 @@ void VariableTable::outputCPPGlobalVariablesMethods(CodeGenerator &cg,
   for (unsigned int i = 0; i < m_symbolVec.size(); i++) {
     const Symbol *sym = m_symbolVec[i];
     if (sym->isSystem()) {
-      assert(!sysDone);
+      always_assert(!sysDone);
       variants.insert(string("gvm_") +
                              CodeGenerator::FormatLabel(sym->getName()));
       maxSysIdx++;
@@ -1424,7 +1423,7 @@ void VariableTable::outputCPPVariableInit(CodeGenerator &cg,
     }
     cg_printf("g->");
     if (cg.getOutput() != CodeGenerator::SystemCPP) {
-      cg_printf(getGlobalVariableName(ar, name).c_str());
+      cg_print(getGlobalVariableName(ar, name).c_str());
     } else {
       cg_printf("GV(%s)", name.c_str());
     }
@@ -1808,8 +1807,8 @@ bool VariableTable::outputCPPJumpTable(CodeGenerator &cg, AnalysisResultPtr ar,
     if (sym->isOverride() || sym->isHidden()) continue;
     if (!stat && isInherited(name)) continue;
     if (!stat &&
-        (sym->isPrivate() && privateVar == NonPrivate ||
-         !sym->isPrivate() && privateVar == Private)) continue;
+        ((sym->isPrivate() && privateVar == NonPrivate) ||
+         (!sym->isPrivate() && privateVar == Private))) continue;
 
     if ((!variantOnly || Type::SameType(sym->getFinalType(), Type::Variant)) &&
         (staticVar & (stat ? Static : NonStatic))) {
@@ -1869,7 +1868,7 @@ bool VariableTable::outputCPPJumpTable(CodeGenerator &cg, AnalysisResultPtr ar,
       case VariableTable::JumpInitializedString: {
         int index = -1;
         int stringId = cg.checkLiteralString(name, index, ar, getBlockScope());
-        assert(index >= 0);
+        always_assert(index >= 0);
         string lisnam = ar->getLiteralStringName(stringId, index);
         cg_printf("HASH_INITIALIZED_NAMSTR(" STRHASH_FMT ", %s, %s,\n",
                   hash_string(name), lisnam.c_str(), varName.c_str());
@@ -1888,7 +1887,7 @@ bool VariableTable::outputCPPJumpTable(CodeGenerator &cg, AnalysisResultPtr ar,
       case VariableTable::JumpReturnString: {
         int index = -1;
         int stringId = cg.checkLiteralString(name, index, ar, getBlockScope());
-        assert(index >= 0);
+        always_assert(index >= 0);
         string lisnam = ar->getLiteralStringName(stringId, index);
         cg_printf("HASH_RETURN_NAMSTR(" STRHASH_FMT ", %s, %s,\n",
                   hash_string(name), lisnam.c_str(), varName.c_str());

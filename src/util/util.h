@@ -14,8 +14,8 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef __UTIL_H__
-#define __UTIL_H__
+#ifndef incl_HPHP_UTIL_H_
+#define incl_HPHP_UTIL_H_
 
 #include <vector>
 #include <string>
@@ -34,6 +34,7 @@ namespace HPHP { namespace Util {
 
 #define ALWAYS_INLINE  __attribute__((always_inline))
 #define NEVER_INLINE  __attribute__((noinline))
+#define INLINE_SINGLE_CALLER ALWAYS_INLINE
 #define LIKELY(pred)   __builtin_expect((pred), true)
 #define UNLIKELY(pred) __builtin_expect((pred), false)
 #define UNUSED         __attribute__((unused))
@@ -65,7 +66,7 @@ namespace HPHP { namespace Util {
  * file
  */
 #define KEEP_SECTION \
-  __attribute__((section(".text.keep")))
+  __attribute__((externally_visible))
 
 /**
  * Split a string into a list of tokens by character delimiter.
@@ -329,4 +330,4 @@ static T& getDataRef(void* base, unsigned offset) {
 ///////////////////////////////////////////////////////////////////////////////
 }}
 
-#endif // __UTIL_H__
+#endif

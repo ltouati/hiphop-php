@@ -14,9 +14,7 @@
    +----------------------------------------------------------------------+
 */
 
-#include <stdint.h>
-#include <stdio.h>
-#include "pathtrack.h"
+#include "util/pathtrack.h"
 
 __thread PathSample pathSamples[MAX_PATH_PTS];
 __thread int npathSamples;

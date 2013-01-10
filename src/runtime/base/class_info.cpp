@@ -605,14 +605,14 @@ bool ClassInfo::HasAccess(CStrRef className, CStrRef methodName,
   if (!methodInfo) return false;
   if (methodInfo->attribute & ClassInfo::IsPublic) return true;
   CStrRef ctxName = hhvm
-                    ? g_vmContext->getContextClassName(true)
+                    ? g_vmContext->getContextClassName()
                     : FrameInjection::GetClassName(true);
   if (ctxName->size() == 0) {
     return false;
   }
   const ClassInfo *ctxClass = ClassInfo::FindClass(ctxName);
   bool hasObject = hasCallObject ||
-    (hhvm ? g_vmContext->getThis(true) : FrameInjection::GetThis(true));
+    (hhvm ? g_vmContext->getThis() : FrameInjection::GetThis(true));
   if (ctxClass) {
     return ctxClass->checkAccess(defClass, methodInfo, staticCall, hasObject);
   }
@@ -811,11 +811,17 @@ ClassInfo::MethodInfo::MethodInfo(const char **&p) {
       docComment = *p++;
     }
 
+    if (attribute & IsSystem) {
+      returnType = (DataType)(int64)(*p++);
+    }
     while (*p) {
       ParameterInfo *parameter = new ParameterInfo();
       parameter->attribute = (Attribute)(int64)(*p++);
       parameter->name = *p++;
       parameter->type = *p++;
+      if (attribute & IsSystem) {
+        parameter->argType = (DataType)(int64)(*p++);
+      }
       parameter->value = *p++;
       parameter->valueText = *p++;
 
@@ -1022,9 +1028,19 @@ void ClassInfoRedeclared::postInit() {
   }
 }
 
+#ifdef HHVM
+extern const char* g_system_class_map[];
+#endif
+
 void ClassInfo::Load() {
   ASSERT(!s_loaded);
-  const char **p = g_class_map;
+  const char **p =
+#ifdef HHVM
+    // In hhvm, only system classes are registered in the class map.
+    g_system_class_map;
+#else
+    g_class_map;
+#endif
   while (*p) {
     Attribute attribute = (Attribute)(int64)*p;
     ClassInfo *info = (attribute & IsRedeclared) ?
@@ -1134,8 +1150,9 @@ Variant ClassPropTable::getInitVal(const ClassPropTableEntry *prop) const {
     }
 
     case 7:
-      return ClassPropTableEntry::GetVariant(DataType((id >> 4) & 15),
-                                             getInitP(id >> 32));
+      return
+        ClassPropTableEntry::GetVariant(DataType((id >> 4) & kDataTypeMask),
+                                        getInitP(id >> 32));
   }
   throw FatalErrorException("Failed to get init val");
 }

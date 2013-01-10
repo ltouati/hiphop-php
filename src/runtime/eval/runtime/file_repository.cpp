@@ -20,13 +20,12 @@
 #include <util/process.h>
 #include <util/atomic.h>
 #include <util/trace.h>
-#include <util/stat_cache.h>
+#include <runtime/base/stat_cache.h>
 #include <runtime/base/server/source_root_info.h>
 
 #include <runtime/vm/translator/targetcache.h>
 #include <runtime/vm/translator/translator-x64.h>
 #include <runtime/vm/bytecode.h>
-#include <runtime/vm/peephole.h>
 #include <runtime/vm/pendq.h>
 #include <runtime/vm/repo.h>
 #include <runtime/vm/runtime.h>
@@ -55,7 +54,7 @@ PhpFile::PhpFile(const string &fileName, const string &srcRoot,
 }
 
 PhpFile::~PhpFile() {
-  assert(m_refCount == 0);
+  always_assert(m_refCount == 0);
   if (m_unit != NULL) {
     // Deleting a Unit can grab a low-ranked lock and we're probably
     // at a high rank right now
@@ -136,6 +135,11 @@ void FileRepository::forEachUnit(VM::UnitVisitor& uit) {
        it != s_md5Files.end(); ++it) {
     uit(it->second->unit());
   }
+}
+
+size_t FileRepository::getLoadedFiles() {
+  ReadLock lock(s_md5Lock);
+  return s_md5Files.size();
 }
 
 PhpFile *FileRepository::checkoutFile(StringData *rname,
@@ -289,7 +293,8 @@ string FileRepository::unitMd5(const string& fileMd5) {
   std::ostringstream opts;
   string t = fileMd5 + '\0'
     + (RuntimeOption::EnableHipHopSyntax ? '1' : '0')
-    + (RuntimeOption::EnableEmitSwitch ? '1' : '0');
+    + (RuntimeOption::EnableEmitSwitch ? '1' : '0')
+    + (RuntimeOption::EvalJitEnableRenameFunction ? '1' : '0');
   md5str = string_md5(t.c_str(), t.size(), false, md5len);
   string s = string(md5str, md5len);
   free(md5str);

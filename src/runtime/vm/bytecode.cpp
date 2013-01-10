@@ -42,9 +42,8 @@
 #include <util/util.h>
 #include <util/trace.h>
 #include <util/debug.h>
-#include <util/stat_cache.h>
+#include <runtime/base/stat_cache.h>
 
-#include <runtime/base/tv_macros.h>
 #include <runtime/vm/instrumentation_hook.h>
 #include <runtime/vm/php_debug.h>
 #include <runtime/vm/debugger_hook.h>
@@ -91,10 +90,6 @@ static const Trace::Module TRACEMOD = Trace::bcinterp;
 
 namespace {
 
-struct HaltVM : std::exception {
-  const char* what() const throw() { return "HaltVM"; }
-};
-
 struct VMPrepareThrow : std::exception {
   const char* what() const throw() { return "VMPrepareThrow"; }
 };
@@ -103,6 +98,11 @@ struct VMPrepareUnwind : std::exception {
   const char* what() const throw() { return "VMPrepareUnwind"; }
 };
 
+}
+
+bool
+ActRec::skipFrame() const {
+  return m_func && m_func->isBuiltin();
 }
 
 template <>
@@ -552,7 +552,10 @@ class StackElms {
     return m_elms;
   }
   void flush() {
-    if (m_elms != NULL) {
+    // For RPCRequestHandler threads, the ExecutionContext can stay alive
+    // across requests, and hold references to the VM stack. Make
+    // sure we don't free the stack from under the ExecutionContext
+    if (m_elms != NULL && g_context.isNull()) {
       free(m_elms);
       m_elms = NULL;
     }
@@ -643,8 +646,7 @@ Stack::requestExit() {
   }
 }
 
-void
-Stack::flush() {
+void flush_evaluation_stack() {
   if (!t_se.isNull()) {
     t_se->flush();
   }
@@ -1386,10 +1388,10 @@ ActRec* VMExecutionContext::getStackFrame() {
   return getFP();
 }
 
-ObjectData* VMExecutionContext::getThis(bool skipFrame /* = false */) {
+ObjectData* VMExecutionContext::getThis() {
   VMRegAnchor _;
   ActRec* fp = getFP();
-  if (skipFrame) {
+  if (fp->skipFrame()) {
     fp = getPrevVMState(fp);
     if (!fp) return NULL;
   }
@@ -1399,11 +1401,11 @@ ObjectData* VMExecutionContext::getThis(bool skipFrame /* = false */) {
   return NULL;
 }
 
-CStrRef VMExecutionContext::getContextClassName(bool skipFrame /* = false */) {
+CStrRef VMExecutionContext::getContextClassName() {
   VMRegAnchor _;
   ActRec* ar = getFP();
   ASSERT(ar != NULL);
-  if (skipFrame) {
+  if (ar->skipFrame()) {
     ar = getPrevVMState(ar);
     if (!ar) return empty_string;
   }
@@ -1416,11 +1418,11 @@ CStrRef VMExecutionContext::getContextClassName(bool skipFrame /* = false */) {
   }
 }
 
-CStrRef VMExecutionContext::getParentContextClassName(bool skip /* = false */) {
+CStrRef VMExecutionContext::getParentContextClassName() {
   VMRegAnchor _;
   ActRec* ar = getFP();
   ASSERT(ar != NULL);
-  if (skip) {
+  if (ar->skipFrame()) {
     ar = getPrevVMState(ar);
     if (!ar) return empty_string;
   }
@@ -1441,12 +1443,11 @@ CStrRef VMExecutionContext::getParentContextClassName(bool skip /* = false */) {
   }
 }
 
-CStrRef VMExecutionContext::getContainingFileName(
-  bool skipFrame /* = false */) {
+CStrRef VMExecutionContext::getContainingFileName() {
   VMRegAnchor _;
   ActRec* ar = getFP();
   if (ar == NULL) return empty_string;
-  if (skipFrame) {
+  if (ar->skipFrame()) {
     ar = getPrevVMState(ar);
     if (ar == NULL) return empty_string;
   }
@@ -1454,24 +1455,24 @@ CStrRef VMExecutionContext::getContainingFileName(
   return unit->filepathRef();
 }
 
-int VMExecutionContext::getLine(bool skipFrame /* = false */) {
+int VMExecutionContext::getLine() {
   VMRegAnchor _;
   ActRec* ar = getFP();
   Unit* unit = ar ? ar->m_func->unit() : NULL;
   Offset pc = unit ? pcOff() : 0;
   if (ar == NULL) return -1;
-  if (skipFrame) {
+  if (ar->skipFrame()) {
     ar = getPrevVMState(ar, &pc);
   }
   if (ar == NULL || (unit = ar->m_func->unit()) == NULL) return -1;
   return unit->getLineNumber(pc);
 }
 
-Array VMExecutionContext::getCallerInfo(bool skipFrame /* = false */) {
+Array VMExecutionContext::getCallerInfo() {
   VMRegAnchor _;
   Array result = Array::Create();
   ActRec* ar = getFP();
-  if (skipFrame) {
+  if (ar->skipFrame()) {
     ar = getPrevVMState(ar);
   }
   while (ar->m_func->name()->isame(s_call_user_func.get())
@@ -1482,7 +1483,7 @@ Array VMExecutionContext::getCallerInfo(bool skipFrame /* = false */) {
     }
   }
 
-  Offset pc;
+  Offset pc = 0;
   ar = getPrevVMState(ar, &pc);
   while (ar != NULL) {
     if (!ar->m_func->name()->isame(s_call_user_func.get())
@@ -1527,7 +1528,7 @@ TypedValue* VMExecutionContext::getCns(StringData* cns,
         }
       }
       TypedValue tv;
-      TV_WRITE_UNINIT(&tv);
+      tvWriteUninit(&tv);
       tvAsVariant(&tv) = ci->getValue();
       m_constants.nvSet(cns, &tv, false);
       tvRefcountedDecRef(&tv);
@@ -1581,12 +1582,12 @@ void VMExecutionContext::addRenameableFunctions(ArrayData* arr) {
   m_renamedFuncs.addRenameableFunctions(arr);
 }
 
-VarEnv* VMExecutionContext::getVarEnv(bool skipBuiltin) {
+VarEnv* VMExecutionContext::getVarEnv() {
   Transl::VMRegAnchor _;
 
   HPHP::VM::VarEnv* builtinVarEnv = NULL;
   HPHP::VM::ActRec* fp = getFP();
-  if (skipBuiltin) {
+  if (fp->skipFrame()) {
     if (fp->hasVarEnv()) {
       builtinVarEnv = fp->getVarEnv();
     }
@@ -1616,8 +1617,11 @@ void VMExecutionContext::setVar(StringData* name, TypedValue* v, bool ref) {
   Transl::VMRegAnchor _;
   // setVar() should only be called after getVarEnv() has been called
   // to create a varEnv
-  ActRec *fp = getPrevVMState(getFP());
+  ActRec *fp = getFP();
   if (!fp) return;
+  if (fp->skipFrame()) {
+    fp = getPrevVMState(fp);
+  }
   ASSERT(!fp->hasInvName());
   ASSERT(!fp->hasExtraArgs());
   ASSERT(fp->m_varEnv != NULL);
@@ -1804,8 +1808,7 @@ bool VMExecutionContext::prepareFuncEntry(ActRec *ar,
     for (int i = nargs; i < nparams; ++i) {
       Offset dvInitializer = paramInfo[i].funcletOff();
       if (dvInitializer == InvalidAbsoluteOffset) {
-        raise_warning("Missing argument %d to %s()",
-                      i + 1, func->name()->data());
+        raise_warning(Strings::MISSING_ARGUMENT, i + 1, func->name()->data());
       }
     }
   }
@@ -1837,7 +1840,7 @@ void VMExecutionContext::enterVMWork(ActRec* enterFnAr) {
       LIKELY(!DEBUGGER_FORCE_INTR)) {
     Transl::SrcKey sk(Transl::curFunc(), m_pc);
     (void) curUnit()->offsetOf(m_pc); /* assert */
-    tx64->resume(sk);
+    tx64->enterTC(sk);
   } else {
     dispatch();
   }
@@ -1944,7 +1947,6 @@ short_jump:
     UnwindStatus unwindType = m_stack.unwindFrame(m_fp, faultPC, m_pc, fault);
     jumpCode = handleUnwind(unwindType);
     goto short_jump;
-  } catch (const HaltVM&) {
   } catch (...) {
     ASSERT(tl_regState == REGSTATE_CLEAN);
     jumpCode = exception_handler();
@@ -2279,7 +2281,7 @@ Array VMExecutionContext::debugBacktrace(bool skip /* = false */,
   }
   // Get the fp and pc of the top frame (possibly skipping one frame)
   ActRec* fp;
-  Offset pc;
+  Offset pc = 0;
   if (skip) {
     fp = getPrevVMState(getFP(), &pc);
     if (!fp) {
@@ -2426,7 +2428,7 @@ const ClassInfo::MethodInfo* VMExecutionContext::findFunctionInfo(
   StringIMap<AtomicSmartPtr<MethodInfoVM> >::iterator it =
     m_functionInfos.find(name);
   if (it == m_functionInfos.end()) {
-    Func* func = Unit::lookupFunc(name.get());
+    Func* func = Unit::loadFunc(name.get());
     if (func == NULL || func->builtinFuncPtr()) {
       // Fall back to the logic in ClassInfo::FindFunction() logic to deal
       // with builtin functions
@@ -2599,10 +2601,14 @@ Unit* VMExecutionContext::evalInclude(StringData* path,
                                       const StringData* curUnitFilePath,
                                       bool* initial) {
   namespace fs = boost::filesystem;
-  fs::path currentUnit(curUnitFilePath->data());
-  fs::path currentDir(currentUnit.branch_path());
-  HPHP::Eval::PhpFile* efile =
-    lookupPhpFile(path, currentDir.string().c_str(), initial);
+  HPHP::Eval::PhpFile* efile = NULL;
+  if (curUnitFilePath) {
+    fs::path currentUnit(curUnitFilePath->data());
+    fs::path currentDir(currentUnit.branch_path());
+    efile = lookupPhpFile(path, currentDir.string().c_str(), initial);
+  } else {
+    efile = lookupPhpFile(path, "", initial);
+  }
   if (efile) {
     return efile->unit();
   }
@@ -2993,7 +2999,7 @@ static inline void lookupd_var(ActRec* fp,
     val = fp->m_varEnv->lookup(name);
     if (val == NULL) {
       TypedValue tv;
-      TV_WRITE_NULL(&tv);
+      tvWriteNull(&tv);
       fp->m_varEnv->set(name, &tv);
       val = fp->m_varEnv->lookup(name);
     }
@@ -3019,7 +3025,7 @@ static inline void lookupd_gbl(ActRec* fp,
   val = varEnv->lookup(name);
   if (val == NULL) {
     TypedValue tv;
-    TV_WRITE_NULL(&tv);
+    tvWriteNull(&tv);
     varEnv->set(name, &tv);
     val = varEnv->lookup(name);
   }
@@ -3183,12 +3189,12 @@ inline void OPTBLD_INLINE VMExecutionContext::getHelperPre(
       if (warn) {
         raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
       }
-      TV_WRITE_NULL(&dummy);
+      tvWriteNull(&dummy);
       loc = &dummy;
     } else {
       loc = fr;
     }
-    LITSTR_DECREF(name);
+    decRefStr(name);
     break;
 
   case LGL:
@@ -3204,12 +3210,12 @@ inline void OPTBLD_INLINE VMExecutionContext::getHelperPre(
       if (warn) {
         raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
       }
-      TV_WRITE_NULL(&dummy);
+      tvWriteNull(&dummy);
       loc = &dummy;
     } else {
       loc = fr;
     }
-    LITSTR_DECREF(name);
+    decRefStr(name);
     break;
 
   case LSC:
@@ -3232,7 +3238,7 @@ inline void OPTBLD_INLINE VMExecutionContext::getHelperPre(
                   class_->name()->data(),
                   name->data());
     }
-    LITSTR_DECREF(name);
+    decRefStr(name);
     break;
   }
 
@@ -3399,7 +3405,7 @@ VMExecutionContext::getElem(TypedValue* base, TypedValue* key,
   ASSERT(base->m_type != KindOfArray);
   bool baseStrOff = false;
   VMRegAnchor _;
-  TV_WRITE_UNINIT(dest);
+  tvWriteUninit(dest);
   TypedValue* result = Elem<true>(*dest, *dest, base, baseStrOff, key);
   if (result != dest) {
     tvDup(result, dest);
@@ -3486,12 +3492,12 @@ inline bool OPTBLD_INLINE VMExecutionContext::setHelperPre(
       if (warn) {
         raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
       }
-      TV_WRITE_NULL(&dummy);
+      tvWriteNull(&dummy);
       loc = &dummy;
     } else {
       loc = fr;
     }
-    LITSTR_DECREF(name);
+    decRefStr(name);
     break;
 
   case LGL:
@@ -3511,12 +3517,12 @@ inline bool OPTBLD_INLINE VMExecutionContext::setHelperPre(
       if (warn) {
         raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
       }
-      TV_WRITE_NULL(&dummy);
+      tvWriteNull(&dummy);
       loc = &dummy;
     } else {
       loc = fr;
     }
-    LITSTR_DECREF(name);
+    decRefStr(name);
     break;
 
   case LSC:
@@ -3539,7 +3545,7 @@ inline bool OPTBLD_INLINE VMExecutionContext::setHelperPre(
                   class_->name()->data(),
                   name->data());
     }
-    LITSTR_DECREF(name);
+    decRefStr(name);
     break;
   }
 
@@ -3746,6 +3752,11 @@ inline void OPTBLD_INLINE VMExecutionContext::iopNull(PC& pc) {
   m_stack.pushNull();
 }
 
+inline void OPTBLD_INLINE VMExecutionContext::iopNullUninit(PC& pc) {
+  NEXT();
+  m_stack.pushNullUninit();
+}
+
 inline void OPTBLD_INLINE VMExecutionContext::iopTrue(PC& pc) {
   NEXT();
   m_stack.pushTrue();
@@ -3832,7 +3843,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopAddElemV(PC& pc) {
   Cell* c2 = m_stack.indC(1);
   Cell* c3 = m_stack.indC(2);
   if (c3->m_type != KindOfArray) {
-    raise_error("AddElemC: $3 must be an array");
+    raise_error("AddElemV: $3 must be an array");
   }
   if (c2->m_type == KindOfInt64) {
     tvCellAsVariant(c3).asArrRef().set(c2->m_data.num, ref(tvAsCVarRef(v1)));
@@ -3859,24 +3870,76 @@ inline void OPTBLD_INLINE VMExecutionContext::iopAddNewElemV(PC& pc) {
   Var* v1 = m_stack.topV();
   Cell* c2 = m_stack.indC(1);
   if (c2->m_type != KindOfArray) {
-    raise_error("AddNewElemC: $2 must be an array");
+    raise_error("AddNewElemV: $2 must be an array");
   }
   tvCellAsVariant(c2).asArrRef().append(ref(tvAsCVarRef(v1)));
   m_stack.popV();
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopNewCol(PC& pc) {
+  NEXT();
+  DECODE_IVA(cType);
+  DECODE_IVA(nElems);
+  ObjectData* obj;
+  switch (cType) {
+    case Collection::VectorType: obj = NEWOBJ(c_Vector)(); break;
+    case Collection::MapType: obj = NEWOBJ(c_Map)(); break;
+    case Collection::StableMapType: obj = NEWOBJ(c_StableMap)(); break;
+    default:
+      obj = NULL;
+      raise_error("NewCol: Invalid collection type");
+      break;
+  }
+  // Reserve enough room for nElems elements in advance
+  if (nElems) {
+    collectionReserve(obj, nElems);
+  }
+  m_stack.pushObject(obj);
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopColAddNewElemC(PC& pc) {
+  NEXT();
+  Cell* c1 = m_stack.topC();
+  Cell* c2 = m_stack.indC(1);
+  if (c2->m_type == KindOfObject && c2->m_data.pobj->isCollection()) {
+    collectionAppend(c2->m_data.pobj, c1);
+  } else {
+    raise_error("ColAddNewElemC: $2 must be a collection");
+  }
+  m_stack.popC();
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopColAddElemC(PC& pc) {
+  NEXT();
+  Cell* c1 = m_stack.topC();
+  Cell* c2 = m_stack.indC(1);
+  Cell* c3 = m_stack.indC(2);
+  if (c3->m_type == KindOfObject && c3->m_data.pobj->isCollection()) {
+    collectionSet(c3->m_data.pobj, c2, c1);
+  } else {
+    raise_error("ColAddElemC: $3 must be a collection");
+  }
+  m_stack.popC();
+  m_stack.popC();
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopCns(PC& pc) {
   NEXT();
   DECODE_LITSTR(s);
   TypedValue* cns = getCns(s);
-  if (cns != NULL) {
-    Cell* c1 = m_stack.allocC();
-    TV_READ_CELL(cns, c1);
-  } else {
-    raise_notice(Strings::UNDEFINED_CONSTANT,
-                 s->data(), s->data());
-    m_stack.pushStaticString(s);
+  if (cns == NULL) {
+    if (AutoloadHandler::s_instance->autoloadConstant(StrNR(s))) {
+      cns = getCns(s);
+    }
+    if (!cns) {
+      raise_notice(Strings::UNDEFINED_CONSTANT,
+                   s->data(), s->data());
+      m_stack.pushStaticString(s);
+      return;
+    }
   }
+  Cell* c1 = m_stack.allocC();
+  tvReadCell(cns, c1);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopDefCns(PC& pc) {
@@ -3899,7 +3962,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopClsCns(PC& pc) {
     raise_error("Couldn't find constant %s::%s",
                 class_->name()->data(), clsCnsName->data());
   }
-  TV_READ_CELL(clsCns, tv);
+  tvReadCell(clsCns, tv);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopClsCnsD(PC& pc) {
@@ -3913,7 +3976,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopClsCnsD(PC& pc) {
                                     classNamedEntity.first, clsCnsName);
   ASSERT(clsCns != NULL);
   Cell* c1 = m_stack.allocC();
-  TV_READ_CELL(clsCns, c1);
+  tvReadCell(clsCns, c1);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopConcat(PC& pc) {
@@ -4204,6 +4267,9 @@ inline void OPTBLD_INLINE VMExecutionContext::iopInstanceOf(PC& pc) {
 inline void OPTBLD_INLINE VMExecutionContext::iopInstanceOfD(PC& pc) {
   NEXT();
   DECODE(Id, id);
+  if (shouldProfile()) {
+    Class::profileInstanceOf(m_fp->m_func->unit()->lookupLitstrId(id));
+  }
   const NamedEntity* ne = m_fp->m_func->unit()->lookupNamedEntityId(id);
   Cell* c1 = m_stack.topC();
   bool r = cellInstanceOf(c1, ne);
@@ -4352,7 +4418,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSwitch(PC& pc) {
   DECODE(int32_t, veclen);
   ASSERT(veclen > 0);
   Offset* jmptab = (Offset*)pc;
-  pc += veclen * sizeof(int32_t);
+  pc += veclen * sizeof(*jmptab);
   DECODE(int64, base);
   DECODE_IVA(bounded);
 
@@ -4449,6 +4515,33 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSwitch(PC& pc) {
   }
 }
 
+inline void OPTBLD_INLINE VMExecutionContext::iopSSwitch(PC& pc) {
+  PC origPC = pc;
+  NEXT();
+  DECODE(int32, veclen);
+  ASSERT(veclen > 1);
+  unsigned cases = veclen - 1; // the last vector item is the default case
+  StrVecItem* jmptab = (StrVecItem*)pc;
+  pc += veclen * sizeof(*jmptab);
+
+  TypedValue* val = m_stack.topTV();
+  Unit* u = m_fp->m_func->unit();
+  unsigned i;
+  for (i = 0; i < cases; ++i) {
+    auto& item = jmptab[i];
+    const StringData* str = u->lookupLitstrId(item.str);
+    if (tvAsVariant(val).equal(str)) {
+      pc = origPC + item.dest;
+      break;
+    }
+  }
+  if (i == cases) {
+    // default case
+    pc = origPC + jmptab[veclen-1].dest;
+  }
+  m_stack.popC();
+}
+
 inline void OPTBLD_INLINE VMExecutionContext::iopRetC(PC& pc) {
   NEXT();
   uint soff = m_fp->m_soff;
@@ -4480,9 +4573,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopRetC(PC& pc) {
                            "%p)\n", os.str().c_str(), m_fp));
     }
 #endif
-    m_fp = NULL;
-    m_pc = NULL;
-    throw HaltVM();
+    pc = 0;
   }
 }
 
@@ -4545,9 +4636,9 @@ static inline void cgetl_body(ActRec* fp,
                               TypedValue* to,
                               Id pind) {
   if (fr->m_type == KindOfUninit) {
-    // `to' is uninitialized here, so we need to TV_WRITE_NULL before
+    // `to' is uninitialized here, so we need to tvWriteNull before
     // possibly causing stack unwinding.
-    TV_WRITE_NULL(to);
+    tvWriteNull(to);
     raise_undefined_local(fp, pind);
   } else {
     cgetl_inner_body(fr, to);
@@ -4594,12 +4685,12 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCGetN(PC& pc) {
   if (fr == NULL || fr->m_type == KindOfUninit) {
     raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
     tvRefcountedDecRefCell(to);
-    TV_WRITE_NULL(to);
+    tvWriteNull(to);
   } else {
     tvRefcountedDecRefCell(to);
     cgetl_inner_body(fr, to);
   }
-  LITSTR_DECREF(name); // TODO(#1146727): leaks during exceptions
+  decRefStr(name); // TODO(#1146727): leaks during exceptions
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopCGetG(PC& pc) {
@@ -4613,16 +4704,16 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCGetG(PC& pc) {
       raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
     }
     tvRefcountedDecRefCell(to);
-    TV_WRITE_NULL(to);
+    tvWriteNull(to);
   } else if (fr->m_type == KindOfUninit) {
     raise_notice(Strings::UNDEFINED_VARIABLE, name->data());
     tvRefcountedDecRefCell(to);
-    TV_WRITE_NULL(to);
+    tvWriteNull(to);
   } else {
     tvRefcountedDecRefCell(to);
     cgetl_inner_body(fr, to);
   }
-  LITSTR_DECREF(name); // TODO(#1146727): leaks during exceptions
+  decRefStr(name); // TODO(#1146727): leaks during exceptions
 }
 
 #define SPROP_OP_PRELUDE                                  \
@@ -4637,7 +4728,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCGetG(PC& pc) {
                accessible);
 
 #define SPROP_OP_POSTLUDE                     \
-  LITSTR_DECREF(name);
+  decRefStr(name);
 
 #define GETS(box) do {                                    \
   SPROP_OP_PRELUDE                                        \
@@ -4670,14 +4761,12 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCGetM(PC& pc) {
   if (tvRet->m_type == KindOfRef) {
     tvUnbox(tvRet);
   }
-  if (typeProfileCGetM) {
-    ASSERT(hasImmVector(*oldPC));
-    const ImmVector& immVec = ImmVector::createFromStream(oldPC + 1);
-    StringData* name;
-    MemberCode mc;
-    if (immVec.decodeLastMember(curUnit(), name, mc)) {
-      recordType(TypeProfileKey(mc, name), m_stack.top()->m_type);
-    }
+  ASSERT(hasImmVector(*oldPC));
+  const ImmVector& immVec = ImmVector::createFromStream(oldPC + 1);
+  StringData* name;
+  MemberCode mc;
+  if (immVec.decodeLastMember(curUnit(), name, mc)) {
+    recordType(TypeProfileKey(mc, name), m_stack.top()->m_type);
   }
 }
 
@@ -4705,7 +4794,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopVGetN(PC& pc) {
   ASSERT(fr != NULL);
   tvRefcountedDecRefCell(to);
   vgetl_body(fr, to);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopVGetG(PC& pc) {
@@ -4717,7 +4806,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopVGetG(PC& pc) {
   ASSERT(fr != NULL);
   tvRefcountedDecRefCell(to);
   vgetl_body(fr, to);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopVGetS(PC& pc) {
@@ -4758,7 +4847,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIssetN(PC& pc) {
   tvRefcountedDecRefCell(tv1);
   tv1->m_data.num = e;
   tv1->m_type = KindOfBoolean;
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopIssetG(PC& pc) {
@@ -4776,7 +4865,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIssetG(PC& pc) {
   tvRefcountedDecRefCell(tv1);
   tv1->m_data.num = e;
   tv1->m_type = KindOfBoolean;
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopIssetS(PC& pc) {
@@ -4887,7 +4976,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopEmptyN(PC& pc) {
   tvRefcountedDecRefCell(tv1);
   tv1->m_data.num = e;
   tv1->m_type = KindOfBoolean;
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopEmptyG(PC& pc) {
@@ -4905,7 +4994,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopEmptyG(PC& pc) {
   tvRefcountedDecRefCell(tv1);
   tv1->m_data.num = e;
   tv1->m_type = KindOfBoolean;
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopEmptyS(PC& pc) {
@@ -4983,7 +5072,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSetN(PC& pc) {
   tvSet(fr, to);
   memcpy((void*)tv2, (void*)fr, sizeof(TypedValue));
   m_stack.discard();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopSetG(PC& pc) {
@@ -4997,7 +5086,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSetG(PC& pc) {
   tvSet(fr, to);
   memcpy((void*)tv2, (void*)fr, sizeof(TypedValue));
   m_stack.discard();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopSetS(PC& pc) {
@@ -5019,7 +5108,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSetS(PC& pc) {
   tvRefcountedDecRefCell(propn);
   memcpy(output, tv1, sizeof(TypedValue));
   m_stack.ndiscard(2);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopSetM(PC& pc) {
@@ -5079,7 +5168,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSetOpN(PC& pc) {
   tvRefcountedDecRef(tv2);
   tvReadCell(to, tv2);
   m_stack.discard();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopSetOpG(PC& pc) {
@@ -5097,7 +5186,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSetOpG(PC& pc) {
   tvRefcountedDecRef(tv2);
   tvReadCell(to, tv2);
   m_stack.discard();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopSetOpS(PC& pc) {
@@ -5121,7 +5210,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopSetOpS(PC& pc) {
   tvRefcountedDecRef(fr);
   tvReadCell(val, output);
   m_stack.ndiscard(2);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopSetOpM(PC& pc) {
@@ -5185,7 +5274,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIncDecN(PC& pc) {
   lookupd_var(m_fp, name, nameCell, local);
   ASSERT(local != NULL);
   IncDecBody<true>(op, local, nameCell);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopIncDecG(PC& pc) {
@@ -5198,7 +5287,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIncDecG(PC& pc) {
   lookupd_gbl(m_fp, name, nameCell, gbl);
   ASSERT(gbl != NULL);
   IncDecBody<true>(op, gbl, nameCell);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopIncDecS(PC& pc) {
@@ -5268,7 +5357,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopBindN(PC& pc) {
   tvBind(fr, to);
   memcpy((void*)nameTV, (void*)fr, sizeof(TypedValue));
   m_stack.discard();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopBindG(PC& pc) {
@@ -5282,7 +5371,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopBindG(PC& pc) {
   tvBind(fr, to);
   memcpy((void*)nameTV, (void*)fr, sizeof(TypedValue));
   m_stack.discard();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopBindS(PC& pc) {
@@ -5304,7 +5393,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopBindS(PC& pc) {
   tvRefcountedDecRefCell(propn);
   memcpy(output, fr, sizeof(TypedValue));
   m_stack.ndiscard(2);
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopBindM(PC& pc) {
@@ -5325,7 +5414,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopUnsetL(PC& pc) {
   ASSERT(local < m_fp->m_func->numLocals());
   TypedValue* tv = frame_local(m_fp, local);
   tvRefcountedDecRef(tv);
-  TV_WRITE_UNINIT(tv);
+  tvWriteUninit(tv);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopUnsetN(PC& pc) {
@@ -5337,10 +5426,10 @@ inline void OPTBLD_INLINE VMExecutionContext::iopUnsetN(PC& pc) {
   ASSERT(!m_fp->hasInvName());
   if (tv != NULL) {
     tvRefcountedDecRef(tv);
-    TV_WRITE_UNINIT(tv);
+    tvWriteUninit(tv);
   }
   m_stack.popC();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopUnsetG(PC& pc) {
@@ -5351,7 +5440,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopUnsetG(PC& pc) {
   ASSERT(varEnv != NULL);
   varEnv->unset(name);
   m_stack.popC();
-  LITSTR_DECREF(name);
+  decRefStr(name);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopUnsetM(PC& pc) {
@@ -5388,7 +5477,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushFunc(PC& pc) {
   StringData* origSd = NULL;
   if (IS_STRING_TYPE(c1->m_type)) {
     origSd = c1->m_data.pstr;
-    func = Unit::lookupFunc(origSd);
+    func = Unit::loadFunc(origSd);
   } else if (c1->m_type == KindOfObject) {
     static StringData* invokeName = StringData::GetStaticString("__invoke");
     origObj = c1->m_data.pobj;
@@ -5415,9 +5504,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushFunc(PC& pc) {
   if (origObj) {
     if (func->attrs() & AttrStatic) {
       ar->setClass(origObj->getVMClass());
-      if (origObj->decRefCount() == 0) {
-        origObj->release();
-      }
+      decRefObj(origObj);
     } else {
       ar->setThis(origObj);
       // Teleport the reference from the destroyed stack cell to the
@@ -5425,9 +5512,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushFunc(PC& pc) {
     }
   } else {
     ar->setThis(NULL);
-    if (origSd->decRefCount() == 0) {
-      origSd->release();
-    }
+    decRefStr(origSd);
   }
   ar->initNumArgs(numArgs);
   ar->setVarEnv(NULL);
@@ -5438,7 +5523,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushFuncD(PC& pc) {
   DECODE_IVA(numArgs);
   DECODE(Id, id);
   const NamedEntityPair nep = m_fp->m_func->unit()->lookupNamedEntityPairId(id);
-  Func* func = Unit::lookupFunc(nep.second, nep.first);
+  Func* func = Unit::loadFunc(nep.second, nep.first);
   if (func == NULL) {
     raise_error("Undefined function: %s",
                 m_fp->m_func->unit()->lookupLitstrId(id)->data());
@@ -5460,7 +5545,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushFuncD(PC& pc) {
   arSetSfp(ar, m_fp); \
   ar->m_func = f; \
   if (res == MethodFoundNoThis) { \
-    if (obj->decRefCount() == 0) obj->release(); \
+    decRefObj(obj); \
     ar->setClass(cls); \
   } else { \
     ASSERT(res == MethodFoundWithThis || res == MagicCallFound); \
@@ -5472,7 +5557,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushFuncD(PC& pc) {
     ar->setInvName(name); \
   } else { \
     ar->setVarEnv(NULL); \
-    LITSTR_DECREF(name); \
+    decRefStr(name); \
   } \
 } while (0)
 
@@ -5510,48 +5595,52 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushObjMethodD(PC& pc) {
   OBJMETHOD_BODY(cls, name, obj);
 }
 
-#define CLSMETHOD_BODY(cls, name, obj, forwarding) do { \
-  const Func* f; \
-  LookupResult res = lookupClsMethod(f, cls, name, obj, true); \
-  if (f->isAbstract()) { \
-    raise_error("Cannot call abstract method %s()", \
-                f->fullName()->data()); \
-  } \
-  if (res == MethodFoundNoThis || res == MagicCallStaticFound) { \
-    obj = NULL; \
-  } else { \
-    ASSERT(obj); \
-    ASSERT(res == MethodFoundWithThis || res == MagicCallFound); \
-    obj->incRefCount(); \
-  } \
-  ASSERT(f); \
-  ActRec* ar = m_stack.allocA(); \
-  arSetSfp(ar, m_fp); \
-  ar->m_func = f; \
-  if (obj) { \
-    ar->setThis(obj); \
-  } else { \
-    if (!forwarding) { \
-      ar->setClass(cls); \
-    } else { \
-      /* Propogate the current late bound class if there is one, */ \
-      /* otherwise use the class given by this instruction's input */ \
-      if (m_fp->hasThis()) { \
-        cls = m_fp->getThis()->getVMClass(); \
-      } else if (m_fp->hasClass()) { \
-        cls = m_fp->getClass(); \
-      } \
-      ar->setClass(cls); \
-    } \
-  } \
-  ar->initNumArgs(numArgs); \
-  if (res == MagicCallFound || res == MagicCallStaticFound) { \
-    ar->setInvName(name); \
-  } else { \
-    ar->setVarEnv(NULL); \
-    LITSTR_DECREF(const_cast<StringData*>(name)); \
-  } \
-} while (0)
+template<bool forwarding>
+void VMExecutionContext::pushClsMethodImpl(Class* cls,
+                                           StringData* name,
+                                           ObjectData* obj,
+                                           int numArgs) {
+  const Func* f;
+  LookupResult res = lookupClsMethod(f, cls, name, obj, true);
+  if (f->isAbstract()) {
+    raise_error("Cannot call abstract method %s()",
+                f->fullName()->data());
+  }
+  if (res == MethodFoundNoThis || res == MagicCallStaticFound) {
+    obj = NULL;
+  } else {
+    ASSERT(obj);
+    ASSERT(res == MethodFoundWithThis || res == MagicCallFound);
+    obj->incRefCount();
+  }
+  ASSERT(f);
+  ActRec* ar = m_stack.allocA();
+  arSetSfp(ar, m_fp);
+  ar->m_func = f;
+  if (obj) {
+    ar->setThis(obj);
+  } else {
+    if (!forwarding) {
+      ar->setClass(cls);
+    } else {
+      /* Propogate the current late bound class if there is one, */
+      /* otherwise use the class given by this instruction's input */
+      if (m_fp->hasThis()) {
+        cls = m_fp->getThis()->getVMClass();
+      } else if (m_fp->hasClass()) {
+        cls = m_fp->getClass();
+      }
+      ar->setClass(cls);
+    }
+  }
+  ar->initNumArgs(numArgs);
+  if (res == MagicCallFound || res == MagicCallStaticFound) {
+    ar->setInvName(name);
+  } else {
+    ar->setVarEnv(NULL);
+    decRefStr(const_cast<StringData*>(name));
+  }
+}
 
 inline void OPTBLD_INLINE VMExecutionContext::iopFPushClsMethod(PC& pc) {
   NEXT();
@@ -5568,7 +5657,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushClsMethod(PC& pc) {
   m_stack.ndiscard(2);
   ASSERT(cls && name);
   ObjectData* obj = m_fp->hasThis() ? m_fp->getThis() : NULL;
-  CLSMETHOD_BODY(cls, name, obj, false);
+  pushClsMethodImpl<false>(cls, name, obj, numArgs);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopFPushClsMethodD(PC& pc) {
@@ -5583,7 +5672,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushClsMethodD(PC& pc) {
     raise_error(Strings::UNKNOWN_CLASS, nep.first->data());
   }
   ObjectData* obj = m_fp->hasThis() ? m_fp->getThis() : NULL;
-  CLSMETHOD_BODY(cls, name, obj, false);
+  pushClsMethodImpl<false>(cls, name, obj, numArgs);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopFPushClsMethodF(PC& pc) {
@@ -5601,7 +5690,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushClsMethodF(PC& pc) {
   // CLSMETHOD_BODY will take care of decReffing name
   m_stack.ndiscard(2);
   ObjectData* obj = m_fp->hasThis() ? m_fp->getThis() : NULL;
-  CLSMETHOD_BODY(cls, name, obj, true);
+  pushClsMethodImpl<true>(cls, name, obj, numArgs);
 }
 
 #undef CLSMETHOD_BODY
@@ -5727,6 +5816,16 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFPushCufSafe(PC& pc) {
 
 static inline ActRec* arFromInstr(TypedValue* sp, const Opcode* pc) {
   return arFromSpOffset((ActRec*)sp, instrSpToArDelta(pc));
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopBPassC(PC& pc) {
+  NEXT();
+  DECODE_IVA(paramId);
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopBPassV(PC& pc) {
+  NEXT();
+  DECODE_IVA(paramId);
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopFPassC(PC& pc) {
@@ -5910,6 +6009,138 @@ inline void OPTBLD_INLINE VMExecutionContext::iopFCall(PC& pc) {
   doFCall<false>(ar, pc);
 }
 
+// Return a function pointer type for calling a builtin with a given
+// return value and args.
+template<class Ret, class... Args> struct NativeFunction {
+  typedef Ret (*type)(Args...);
+};
+
+// Recursively pack all parameters up to call a native builtin.
+template<class Ret, size_t NArgs, size_t CurArg> struct NativeFuncCaller;
+template<class Ret, size_t NArgs, size_t CurArg> struct NativeFuncCaller {
+  template<class... Args>
+  static Ret call(const Func* func, TypedValue* tvs, Args... args) {
+    typedef NativeFuncCaller<Ret,NArgs - 1,CurArg + 1> NextArgT;
+    DataType type = func->params()[CurArg].builtinType();
+    if (type == KindOfDouble) {
+      // Doubles have a different calling convention.  So we need to
+      // tell the C++ type system about it.
+      return NextArgT::call(func, tvs - 1, args..., tvs->m_data.dbl);
+    } else {
+      uintptr_t newArg = (type == KindOfInt64 || type == KindOfBoolean)
+        ? tvs->m_data.num
+        : uintptr_t(tvs);
+      return NextArgT::call(func, tvs - 1, args..., newArg);
+    }
+  }
+};
+template<class Ret, size_t CurArg> struct NativeFuncCaller<Ret,0,CurArg> {
+  template<class... Args>
+  static Ret call(const Func* f, TypedValue*, Args... args) {
+    typedef typename NativeFunction<Ret,Args...>::type FuncType;
+    return reinterpret_cast<FuncType>(f->nativeFuncPtr())(args...);
+  }
+};
+
+template<class Ret>
+static Ret makeNativeCall(const Func* f, TypedValue* args, size_t numArgs) {
+  static_assert(kMaxBuiltinArgs == 5,
+                "makeNativeCall needs updates for kMaxBuiltinArgs");
+  switch (numArgs) {
+  case 0: return NativeFuncCaller<Ret,0,0>::call(f, args);
+  case 1: return NativeFuncCaller<Ret,1,0>::call(f, args);
+  case 2: return NativeFuncCaller<Ret,2,0>::call(f, args);
+  case 3: return NativeFuncCaller<Ret,3,0>::call(f, args);
+  case 4: return NativeFuncCaller<Ret,4,0>::call(f, args);
+  case 5: return NativeFuncCaller<Ret,5,0>::call(f, args);
+  default: ASSERT(false);
+  }
+  not_reached();
+}
+
+static int makeNativeRefCall(const Func* f, TypedValue* ret,
+                             TypedValue* args, size_t numArgs) {
+  switch (numArgs) {
+  case 0: return NativeFuncCaller<int64_t,0,0>::call(f, args, ret);
+  case 1: return NativeFuncCaller<int64_t,1,0>::call(f, args, ret);
+  case 2: return NativeFuncCaller<int64_t,2,0>::call(f, args, ret);
+  case 3: return NativeFuncCaller<int64_t,3,0>::call(f, args, ret);
+  case 4: return NativeFuncCaller<int64_t,4,0>::call(f, args, ret);
+  case 5: return NativeFuncCaller<int64_t,5,0>::call(f, args, ret);
+  default: ASSERT(false);
+  }
+  not_reached();
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopFCallBuiltin(PC& pc) {
+  NEXT();
+  DECODE_IA(numArgs);
+  DECODE_IA(numNonDefault);
+  DECODE(Id, id);
+  const NamedEntityPair nep = m_fp->m_func->unit()->lookupNamedEntityPairId(id);
+  Func* func = Unit::lookupFunc(nep.second, nep.first);
+  if (func == NULL) {
+    raise_error("Undefined function: %s",
+                m_fp->m_func->unit()->lookupLitstrId(id)->data());
+  }
+  TypedValue* args = m_stack.indTV(numArgs-1);
+  ASSERT(numArgs == func->numParams());
+  for (int i = 0; i < numNonDefault; i++) {
+    const Func::ParamInfo& pi = func->params()[i];
+
+#define CASE(kind) case KindOf ## kind : do { \
+  tvCastTo ## kind ## InPlace(&args[-i]); break; \
+} while (0); break;
+
+    switch (pi.builtinType()) {
+      CASE(Boolean)
+      CASE(Int64)
+      CASE(Double)
+      CASE(String)
+      CASE(Array)
+      CASE(Object)
+      case KindOfUnknown:
+                break;
+      default:
+                not_reached();
+    }
+  }
+#undef CASE
+
+  TypedValue ret;
+  ret.m_type = func->returnType();
+  switch (func->returnType()) {
+  case KindOfBoolean:
+    ret.m_data.num = makeNativeCall<bool>(func, args, numArgs);
+    break;
+  case KindOfNull:  /* void return type */
+  case KindOfInt64:
+    ret.m_data.num = makeNativeCall<int64_t>(func, args, numArgs);
+    break;
+  case KindOfString:
+  case KindOfArray:
+  case KindOfObject:
+    makeNativeRefCall(func, &ret, args, numArgs);
+    if (ret.m_data.num == 0) {
+      ret.m_type = KindOfNull;
+    }
+    break;
+  case KindOfUnknown:
+    makeNativeRefCall(func, &ret, args, numArgs);
+    if (ret.m_type == KindOfUninit) {
+      ret.m_type = KindOfNull;
+    }
+    break;
+  default:
+    not_reached();
+  }
+
+  frame_free_args(args, numNonDefault);
+  m_stack.ndiscard(numArgs - 1);
+
+  memcpy(m_stack.top(), &ret, sizeof(TypedValue));
+}
+
 bool VMExecutionContext::prepareArrayArgs(ActRec* ar,
                                           ArrayData* args,
                                           ExtraArgs*& extraArgs) {
@@ -5981,10 +6212,12 @@ bool VMExecutionContext::prepareArrayArgs(ActRec* ar,
 static void cleanupParamsAndActRec(VM::Stack& stack,
                                    ActRec* ar,
                                    ExtraArgs* extraArgs) {
-  for (int i = ar->numArgs(); i--; ) {
+  ASSERT(stack.top() + (extraArgs ?
+                        ar->m_func->numParams() :
+                        ar->numArgs()) == (void*)ar);
+  while (stack.top() != (void*)ar) {
     stack.popTV();
   }
-  ASSERT(stack.top() == (void*)ar);
   stack.popAR();
   if (extraArgs) {
     const int numExtra = ar->numArgs() - ar->m_func->numParams();
@@ -6083,22 +6316,18 @@ inline void OPTBLD_INLINE VMExecutionContext::iopCufSafeReturn(PC& pc) {
   m_stack.ndiscard(2);
 }
 
-inline void OPTBLD_INLINE VMExecutionContext::iopIterInit(PC& pc) {
-  PC origPc = pc;
-  NEXT();
-  DECODE_IA(itId);
-  DECODE(Offset, offset);
-  Cell* c1 = m_stack.topC();
+inline bool VMExecutionContext::initIterator(PC& pc, PC& origPc, Iter* it,
+                                             Offset offset, Cell* c1) {
+  bool hasElems = true;
   if (c1->m_type == KindOfArray) {
     if (!c1->m_data.parr->empty()) {
-      Iter* it = frame_iter(m_fp, itId);
       (void) new (&it->arr()) ArrayIter(c1->m_data.parr); // call CTor
       it->m_itype = Iter::TypeArray;
     } else {
       ITER_SKIP(offset);
+      hasElems = false;
     }
   } else if (c1->m_type == KindOfObject) {
-    Iter* it = frame_iter(m_fp, itId);
     bool isIterator;
     if (c1->m_data.pobj->isCollection()) {
       isIterator = true;
@@ -6106,7 +6335,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIterInit(PC& pc) {
     } else {
       Object obj = c1->m_data.pobj->iterableObject(isIterator);
       if (isIterator) {
-        (void) new (&it->arr()) ArrayIter(obj.get());
+        (void) new (&it->arr()) ArrayIter(obj, ArrayIter::transferOwner);
       } else {
         Class* ctx = arGetContextClass(m_fp);
         CStrRef ctxStr = ctx ? ctx->nameRef() : null_string;
@@ -6115,39 +6344,74 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIterInit(PC& pc) {
         (void) new (&it->arr()) ArrayIter(ad);
       }
     }
-    if (it->arr().end()) {
-      // Iterator was empty; call the destructor on the iterator we
-      // just constructed and branch to done case
+    try {
+      if (it->arr().end()) {
+        // Iterator was empty; call the destructor on the iterator we
+        // just constructed and branch to done case
+        it->arr().~ArrayIter();
+        ITER_SKIP(offset);
+        hasElems = false;
+      } else {
+        it->m_itype = (isIterator ? Iter::TypeIterator : Iter::TypeArray);
+      }
+    } catch (...) {
       it->arr().~ArrayIter();
-      ITER_SKIP(offset);
-    } else {
-      it->m_itype = (isIterator ? Iter::TypeIterator : Iter::TypeArray);
+      throw;
     }
   } else {
     raise_warning("Invalid argument supplied for foreach()");
     ITER_SKIP(offset);
+    hasElems = false;
   }
   m_stack.popC();
+  return hasElems;
 }
 
-inline void OPTBLD_INLINE VMExecutionContext::iopIterInitM(PC& pc) {
+inline void OPTBLD_INLINE VMExecutionContext::iopIterInit(PC& pc) {
   PC origPc = pc;
   NEXT();
   DECODE_IA(itId);
   DECODE(Offset, offset);
-  Var* v1 = m_stack.topV();
-  ASSERT(v1->m_type == KindOfRef);
+  DECODE_HA(val);
+  Cell* c1 = m_stack.topC();
+  Iter* it = frame_iter(m_fp, itId);
+  TypedValue* tv1 = frame_local(m_fp, val);
+  if (initIterator(pc, origPc, it, offset, c1)) {
+    storeIterValueC(it, tv1);
+  }
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopIterInitK(PC& pc) {
+  PC origPc = pc;
+  NEXT();
+  DECODE_IA(itId);
+  DECODE(Offset, offset);
+  DECODE_HA(val);
+  DECODE_HA(key);
+  Cell* c1 = m_stack.topC();
+  Iter* it = frame_iter(m_fp, itId);
+  TypedValue* tv1 = frame_local(m_fp, val);
+  TypedValue* tv2 = frame_local(m_fp, key);
+  if (initIterator(pc, origPc, it, offset, c1)) {
+    storeIterValueC(it, tv1);
+    storeIterKeyC(it, tv2);
+  }
+}
+
+inline bool VMExecutionContext::initIteratorM(PC& pc, PC& origPc, Iter* it,
+                                              Offset offset, Var* v1) {
+  bool hasElems = true;
   TypedValue* rtv = v1->m_data.pref->tv();
   if (rtv->m_type == KindOfArray) {
     ArrayData* ad = rtv->m_data.parr;
     if (!ad->empty()) {
-      Iter* it = frame_iter(m_fp, itId);
       MIterCtx& mi = it->marr();
       (void) new (&mi) MIterCtx(v1->m_data.pref);
       it->m_itype = Iter::TypeMutableArray;
       mi.mArray().advance();
     } else {
       ITER_SKIP(offset);
+      hasElems = false;
     }
   } else if (rtv->m_type == KindOfObject)  {
     if (rtv->m_data.pobj->getCollectionType() != 0) {
@@ -6163,9 +6427,9 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIterInitM(PC& pc) {
     Array iterArray = obj->o_toIterArray(ctxStr, true);
     if (iterArray->empty()) {
       ITER_SKIP(offset);
+      hasElems = false;
     } else {
       ArrayData* ad = iterArray.detach();
-      Iter* it = frame_iter(m_fp, itId);
       MIterCtx& mi = it->marr();
       (void) new (&mi) MIterCtx(ad);
       mi.mArray().advance();
@@ -6176,107 +6440,93 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIterInitM(PC& pc) {
       raise_warning("Invalid argument supplied for foreach()");
     }
     ITER_SKIP(offset);
+    hasElems = false;
   }
   m_stack.popV();
+  return hasElems;
 }
 
-inline void OPTBLD_INLINE VMExecutionContext::iopIterValueC(PC& pc) {
+inline void OPTBLD_INLINE VMExecutionContext::iopIterInitM(PC& pc) {
+  PC origPc = pc;
   NEXT();
   DECODE_IA(itId);
+  DECODE(Offset, offset);
+  DECODE_HA(val);
+  Var* v1 = m_stack.topV();
+  ASSERT(v1->m_type == KindOfRef);
   Iter* it = frame_iter(m_fp, itId);
-  switch (it->m_itype) {
-  case Iter::TypeUndefined: {
-    ASSERT(false);
-    break;
-  }
-  case Iter::TypeArray:
-  case Iter::TypeIterator: {
-    // The emitter should never generate bytecode where the iterator
-    // is at the end before IterValueC is executed. However, even if
-    // the iterator is at the end, it is safe to call second().
-    Cell* c1 = m_stack.allocC();
-    TV_WRITE_NULL(c1);
-    tvCellAsVariant(c1) = it->arr().second();
-    break;
-  }
-  case Iter::TypeMutableArray: {
-    // Dup value.
-    TypedValue* tv1 = m_stack.allocTV();
-    tvDup(&it->marr().val(), tv1);
-    ASSERT(tv1->m_type == KindOfRef);
-    tvUnbox(tv1);
-    break;
-  }
-  default: {
-    not_reached();
-  }
+  TypedValue* tv1 = frame_local(m_fp, val);
+  if (initIteratorM(pc, origPc, it, offset, v1)) {
+    storeIterValueV(it, tv1);
   }
 }
 
-inline void OPTBLD_INLINE VMExecutionContext::iopIterValueV(PC& pc) {
+inline void OPTBLD_INLINE VMExecutionContext::iopIterInitMK(PC& pc) {
+  PC origPc = pc;
   NEXT();
   DECODE_IA(itId);
+  DECODE(Offset, offset);
+  DECODE_HA(val);
+  DECODE_HA(key);
+  Var* v1 = m_stack.topV();
+  ASSERT(v1->m_type == KindOfRef);
   Iter* it = frame_iter(m_fp, itId);
-  switch (it->m_itype) {
-  case Iter::TypeUndefined: {
-    ASSERT(false);
-    break;
-  }
-  case Iter::TypeArray:
-  case Iter::TypeIterator: {
-    // The emitter should never generate bytecode where the iterator
-    // is at the end before IterValueV is executed. However, even if
-    // the iterator is at the end, it is safe to call secondRef().
-    TypedValue* tv = m_stack.allocTV();
-    TV_WRITE_NULL(tv);
-    tvAsVariant(tv) = ref(it->arr().secondRef());
-    break;
-  }
-  case Iter::TypeMutableArray: {
-    // Dup value.
-    TypedValue* tv1 = m_stack.allocTV();
-    tvDup(&it->marr().val(), tv1);
-    ASSERT(tv1->m_type == KindOfRef);
-    break;
-  }
-  default: {
-    not_reached();
-  }
+  TypedValue* tv1 = frame_local(m_fp, val);
+  TypedValue* tv2 = frame_local(m_fp, key);
+  if (initIteratorM(pc, origPc, it, offset, v1)) {
+    storeIterValueV(it, tv1);
+    storeIterKeyV(it, tv2);
   }
 }
 
-inline void OPTBLD_INLINE VMExecutionContext::iopIterKey(PC& pc) {
-  NEXT();
-  DECODE_IVA(itId);
-  Iter* it = frame_iter(m_fp, itId);
-  switch (it->m_itype) {
-  case Iter::TypeUndefined: {
-    ASSERT(false);
-    break;
+inline void VMExecutionContext::storeIterValueC(Iter* it, TypedValue* tv1) {
+  ASSERT(it->m_itype == Iter::TypeArray || it->m_itype == Iter::TypeIterator);
+  // The emitter should never generate bytecode where the iterator
+  // is at the end before IterValueC is executed. However, even if
+  // the iterator is at the end, it is safe to call second().
+  tvAsVariant(tv1) = it->arr().second();
+}
+
+inline void VMExecutionContext::storeIterValueV(Iter* it, TypedValue* tv1) {
+  ASSERT(it->m_itype == Iter::TypeMutableArray);
+  // Dup value.
+  tvAsVariant(tv1).assignRef(tvAsVariant(&it->marr().val()));
+  ASSERT(tv1->m_type == KindOfRef);
+}
+
+inline void VMExecutionContext::storeIterKeyC(Iter* it, TypedValue* tv1) {
+  ASSERT(it->m_itype == Iter::TypeArray || it->m_itype == Iter::TypeIterator);
+  // The iterator should never be at the end here. We can't check for it,
+  // because that may call into user code, which has PHP-visible effects and
+  // is incorrect.
+  tvAsVariant(tv1) = it->arr().first();
+}
+
+inline void VMExecutionContext::storeIterKeyV(Iter* it, TypedValue* tv1) {
+  ASSERT(it->m_itype == Iter::TypeMutableArray);
+  tvAsVariant(tv1) = tvAsVariant(&it->marr().key());
+}
+
+inline bool VMExecutionContext::iterNext(PC& pc, PC& origPc, Iter* it,
+                                         Offset offset) {
+  ASSERT(it->m_itype == Iter::TypeArray || it->m_itype == Iter::TypeIterator);
+  // The emitter should never generate bytecode where the iterator
+  // is at the end before IterNext is executed. However, even if
+  // the iterator is at the end, it is safe to call next().
+  ArrayIter* ai = &it->arr();
+  ai->next();
+  if (ai->end()) {
+    // If after advancing the iterator we have reached the end, free
+    // the iterator and fall through to the next instruction.
+    // The ArrayIter destructor will decRef the array.
+    ai->~ArrayIter();
+    it->m_itype = Iter::TypeUndefined;
+    return false;
   }
-  case Iter::TypeArray:
-  case Iter::TypeIterator: {
-    // The iterator should never be at the end here. We can't check for it,
-    // because that may call into user code, which has PHP-visible effects and
-    // is incorrect.
-    Cell* c1 = m_stack.allocC();
-    TV_WRITE_NULL(c1);
-    tvCellAsVariant(c1) = it->arr().first();
-    break;
-  }
-  case Iter::TypeMutableArray: {
-    // Dup key.
-    TypedValue* tv1 = m_stack.allocTV();
-    tvDup(&it->marr().key(), tv1);
-    if (tv1->m_type == KindOfRef) {
-      tvUnbox(tv1);
-    }
-    break;
-  }
-  default: {
-    not_reached();
-  }
-  }
+  // If after advancing the iterator we have not reached the end,
+  // jump to the location specified by the second immediate argument.
+  ITER_SKIP(offset);
+  return true;
 }
 
 inline void OPTBLD_INLINE VMExecutionContext::iopIterNext(PC& pc) {
@@ -6284,45 +6534,74 @@ inline void OPTBLD_INLINE VMExecutionContext::iopIterNext(PC& pc) {
   NEXT();
   DECODE_IA(itId);
   DECODE(Offset, offset);
+  DECODE_HA(val);
   Iter* it = frame_iter(m_fp, itId);
-  switch (it->m_itype) {
-  case Iter::TypeUndefined: {
-    ASSERT(false);
-    break;
+  TypedValue* tv1 = frame_local(m_fp, val);
+  if (iterNext(pc, origPc, it, offset)) {
+    storeIterValueC(it, tv1);
   }
-  case Iter::TypeArray:
-  case Iter::TypeIterator: {
-    // The emitter should never generate bytecode where the iterator
-    // is at the end before IterNext is executed. However, even if
-    // the iterator is at the end, it is safe to call next().
-    if (iter_next_array(it)) {
-      // If after advancing the iterator we have not reached the end,
-      // jump to the location specified by the second immediate argument.
-      ITER_SKIP(offset);
-    } else {
-      // If after advancing the iterator we have reached the end, free
-      // the iterator and fall through to the next instruction.
-      ASSERT(it->m_itype == Iter::TypeUndefined);
-    }
-    break;
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopIterNextK(PC& pc) {
+  PC origPc = pc;
+  NEXT();
+  DECODE_IA(itId);
+  DECODE(Offset, offset);
+  DECODE_HA(val);
+  DECODE_HA(key);
+  Iter* it = frame_iter(m_fp, itId);
+  TypedValue* tv1 = frame_local(m_fp, val);
+  TypedValue* tv2 = frame_local(m_fp, key);
+  if (iterNext(pc, origPc, it, offset)) {
+    storeIterValueC(it, tv1);
+    storeIterKeyC(it, tv2);
   }
-  case Iter::TypeMutableArray: {
-    MIterCtx &mi = it->marr();
-    if (!mi.mArray().advance()) {
-      // If after advancing the iterator we have reached the end, free
-      // the iterator and fall through to the next instruction.
-      mi.~MIterCtx();
-      it->m_itype = Iter::TypeUndefined;
-    } else {
-      // If after advancing the iterator we have not reached the end,
-      // jump to the location specified by the second immediate argument.
-      ITER_SKIP(offset);
-    }
-    break;
+}
+
+inline bool VMExecutionContext::iterNextM(PC& pc, PC& origPc, Iter* it,
+                                          Offset offset) {
+  ASSERT(it->m_itype == Iter::TypeMutableArray);
+  MIterCtx &mi = it->marr();
+  if (!mi.mArray().advance()) {
+    // If after advancing the iterator we have reached the end, free
+    // the iterator and fall through to the next instruction.
+    mi.~MIterCtx();
+    it->m_itype = Iter::TypeUndefined;
+    return false;
+  } else {
+    // If after advancing the iterator we have not reached the end,
+    // jump to the location specified by the second immediate argument.
+    ITER_SKIP(offset);
+    return true;
   }
-  default: {
-    not_reached();
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopIterNextM(PC& pc) {
+  PC origPc = pc;
+  NEXT();
+  DECODE_IA(itId);
+  DECODE(Offset, offset);
+  DECODE_HA(val);
+  Iter* it = frame_iter(m_fp, itId);
+  TypedValue* tv1 = frame_local(m_fp, val);
+  if (iterNextM(pc, origPc, it, offset)) {
+    storeIterValueV(it, tv1);
   }
+}
+
+inline void OPTBLD_INLINE VMExecutionContext::iopIterNextMK(PC& pc) {
+  PC origPc = pc;
+  NEXT();
+  DECODE_IA(itId);
+  DECODE(Offset, offset);
+  DECODE_HA(val);
+  DECODE_HA(key);
+  Iter* it = frame_iter(m_fp, itId);
+  TypedValue* tv1 = frame_local(m_fp, val);
+  TypedValue* tv2 = frame_local(m_fp, key);
+  if (iterNextM(pc, origPc, it, offset)) {
+    storeIterValueV(it, tv1);
+    storeIterKeyV(it, tv2);
   }
 }
 
@@ -6481,7 +6760,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopInitThisLoc(PC& pc) {
     thisLoc->m_type = KindOfObject;
     tvIncRef(thisLoc);
   } else {
-    TV_WRITE_UNINIT(thisLoc);
+    tvWriteUninit(thisLoc);
   }
 }
 
@@ -6497,7 +6776,7 @@ lookupStatic(StringData* name,
   val = map->nvGet(name);
   if (val == NULL) {
     TypedValue tv;
-    TV_WRITE_UNINIT(&tv);
+    tvWriteUninit(&tv);
     map->nvSet(name, &tv, false);
     val = map->nvGet(name);
     inited = false;
@@ -6537,8 +6816,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopStaticLocInit(PC& pc) {
   ASSERT(fr != NULL);
   if (!inited) {
     Cell* initVal = m_stack.topC();
-    // don't set _count field as the static var resides in an HphpArray
-    TV_DUP_NC(initVal, fr);
+    tvDup(initVal, fr);
   }
   if (fr->m_type != KindOfRef) {
     ASSERT(!inited);
@@ -6611,9 +6889,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopNativeImpl(PC& pc) {
                            "%p)\n", os.str().c_str(), m_fp));
     }
 #endif
-    m_fp = NULL;
-    m_pc = NULL;
-    throw HaltVM();
+    pc = 0;
   }
 }
 
@@ -6865,7 +7141,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContReceive(PC& pc) {
   Variant val = cont->t_receive();
 
   TypedValue* tv = m_stack.allocTV();
-  TV_WRITE_UNINIT(tv);
+  tvWriteUninit(tv);
   tvAsVariant(tv) = val;
 }
 
@@ -6912,7 +7188,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContRaise(PC& pc) {
 inline void OPTBLD_INLINE VMExecutionContext::iopContValid(PC& pc) {
   NEXT();
   TypedValue* tv = m_stack.allocTV();
-  TV_WRITE_UNINIT(tv);
+  tvWriteUninit(tv);
   tvAsVariant(tv) = !this_continuation(m_fp)->m_done;
 }
 
@@ -6922,7 +7198,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContCurrent(PC& pc) {
   cont->startedCheck();
 
   TypedValue* tv = m_stack.allocTV();
-  TV_WRITE_UNINIT(tv);
+  tvWriteUninit(tv);
   tvAsVariant(tv) = cont->m_value;
 }
 
@@ -6936,6 +7212,7 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContHandle(PC& pc) {
   c_Continuation* cont = this_continuation(m_fp);
   cont->m_running = false;
   cont->m_done = true;
+  cont->m_value.setNull();
 
   Variant exn = tvAsVariant(m_stack.topTV());
   m_stack.popC();
@@ -6946,16 +7223,22 @@ inline void OPTBLD_INLINE VMExecutionContext::iopContHandle(PC& pc) {
 inline void OPTBLD_INLINE VMExecutionContext::iopStrlen(PC& pc) {
   NEXT();
   TypedValue* subj = m_stack.topTV();
-  int64 ans = 0;
   if (LIKELY(IS_STRING_TYPE(subj->m_type))) {
-    ans = subj->m_data.pstr->size();
+    int64 ans = subj->m_data.pstr->size();
+    tvRefcountedDecRef(subj);
+    subj->m_type = KindOfInt64;
+    subj->m_data.num = ans;
   } else {
-    ans = f_strlen(tvAsVariant(subj));
+    Variant ans = f_strlen(tvAsVariant(subj));
+    tvAsVariant(subj) = ans;
   }
+}
 
-  tvRefcountedDecRef(subj);
-  subj->m_type = KindOfInt64;
-  subj->m_data.num = ans;
+inline void OPTBLD_INLINE VMExecutionContext::iopIncStat(PC& pc) {
+  NEXT();
+  DECODE_IVA(counter);
+  DECODE_IVA(value);
+  Stats::inc(Stats::StatCounter(counter), value);
 }
 
 void VMExecutionContext::classExistsImpl(PC& pc, Attr typeAttr) {
@@ -7035,9 +7318,9 @@ void VMExecutionContext::PrintTCCallerInfo() {
   VMRegAnchor _;
   ActRec* fp = g_vmContext->getFP();
   Unit* u = fp->m_func->unit();
-  printf("Called from TC address %p\n",
-         TranslatorX64::Get()->getTranslatedCaller());
-  std::cout << u->filepath()->data() << ':'
+  fprintf(stderr, "Called from TC address %p\n",
+          TranslatorX64::Get()->getTranslatedCaller());
+  std::cerr << u->filepath()->data() << ':'
             << u->getLineNumber(u->offsetOf(g_vmContext->getPC())) << std::endl;
 }
 
@@ -7137,25 +7420,25 @@ inline void VMExecutionContext::dispatchImpl(int numInstrs) {
 #endif /* HPHP_TRACE */
   bool isCtlFlow = false;
 
-#define DISPATCH() do {                                                       \
-    if ((breakOnCtlFlow && isCtlFlow) ||                                      \
-        (limInstrs && UNLIKELY(numInstrs-- == 0))) {                          \
-      ONTRACE(1,                                                              \
+#define DISPATCH() do {                                                 \
+    if ((breakOnCtlFlow && isCtlFlow) ||                                \
+        (limInstrs && UNLIKELY(numInstrs-- == 0))) {                    \
+      ONTRACE(1,                                                        \
               Trace::trace("dispatch: Halt ExecutionContext::dispatch(%p)\n", \
-                           m_fp));                                            \
-      delete g_vmContext->m_lastLocFilter;                                    \
-      g_vmContext->m_lastLocFilter = NULL;                                    \
-      return;                                                                 \
-    }                                                                         \
-    Op op = (Op)*pc;                                                          \
-    COND_STACKTRACE("dispatch:                    ");                         \
-    ONTRACE(1,                                                                \
-            Trace::trace("dispatch: %d: %s\n", pcOff(), nametab[op]));        \
-    ASSERT(op < Op_count);                                                    \
-    if (profile && (op == OpRetC || op == OpRetV)) { \
-      profileReturnValue(m_stack.top()->m_type); \
-    } \
-    goto *optab[op];                                                          \
+                           m_fp));                                      \
+      delete g_vmContext->m_lastLocFilter;                              \
+      g_vmContext->m_lastLocFilter = NULL;                              \
+      return;                                                           \
+    }                                                                   \
+    Op op = (Op)*pc;                                                    \
+    COND_STACKTRACE("dispatch:                    ");                   \
+    ONTRACE(1,                                                          \
+            Trace::trace("dispatch: %d: %s\n", pcOff(), nametab[op]));  \
+    ASSERT(op < Op_count);                                              \
+    if (profile && (op == OpRetC || op == OpRetV)) {                    \
+      profileReturnValue(m_stack.top()->m_type);                        \
+    }                                                                   \
+    goto *optab[op];                                                    \
 } while (0)
 
   ONTRACE(1, Trace::trace("dispatch: Enter ExecutionContext::dispatch(%p)\n",
@@ -7163,23 +7446,27 @@ inline void VMExecutionContext::dispatchImpl(int numInstrs) {
   PC pc = m_pc;
   DISPATCH();
 
-#define O(name, imm, pusph, pop, flags)                                       \
-  LabelDbg##name:                                                             \
-    phpDebuggerHook(pc);                                                      \
-  LabelInst##name:                                                            \
-    INST_HOOK_PC(injTable, pc);                                               \
-  LabelCover##name:                                                           \
-    if (collectCoverage) {                                                    \
-      recordCodeCoverage(pc);                                                 \
-    }                                                                         \
-  Label##name: {                                                              \
-    iop##name(pc);                                                            \
-    SYNC();                                                                   \
-    if (breakOnCtlFlow) {                                                     \
-      isCtlFlow = instrIsControlFlow(Op##name);                               \
-      Stats::incOp(Op##name);                                                 \
-    }                                                                         \
-    DISPATCH();                                                               \
+#define O(name, imm, pusph, pop, flags)                       \
+  LabelDbg##name:                                             \
+    phpDebuggerHook(pc);                                      \
+  LabelInst##name:                                            \
+    INST_HOOK_PC(injTable, pc);                               \
+  LabelCover##name:                                           \
+    if (collectCoverage) {                                    \
+      recordCodeCoverage(pc);                                 \
+    }                                                         \
+  Label##name: {                                              \
+    iop##name(pc);                                            \
+    SYNC();                                                   \
+    if (breakOnCtlFlow) {                                     \
+      isCtlFlow = instrIsControlFlow(Op##name);               \
+      Stats::incOp(Op##name);                                 \
+    }                                                         \
+    const Op op = Op##name;                                   \
+    if (op == OpRetC || op == OpRetV || op == OpNativeImpl) { \
+      if (UNLIKELY(!pc)) { m_fp = 0; return; }                \
+    }                                                         \
+    DISPATCH();                                               \
   }
   OPCODES
 #undef O

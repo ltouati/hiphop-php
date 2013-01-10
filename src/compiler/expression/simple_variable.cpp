@@ -55,9 +55,14 @@ ExpressionPtr SimpleVariable::clone() {
 
 void SimpleVariable::setContext(Context context) {
   m_context |= context;
-  if (m_this && context & (RefValue | RefAssignmentLHS)) {
-    if (FunctionScopePtr func = getFunctionScope()) {
-      func->setContainsBareThis(true, true);
+  if (m_this) {
+    bool ref = context & (RefValue | RefAssignmentLHS);
+    bool unset = ((context & Expression::UnsetContext) &&
+      (context & Expression::LValue));
+    if (ref || unset) {
+      if (FunctionScopePtr func = getFunctionScope()) {
+        func->setContainsBareThis(true, true);
+      }
     }
   }
 }
@@ -79,7 +84,7 @@ void SimpleVariable::updateSymbol(SimpleVariablePtr src) {
 
 bool SimpleVariable::couldBeAliased() const {
   if (m_globals || m_superGlobal) return true;
-  assert(m_sym);
+  always_assert(m_sym);
   if (m_sym->isGlobal() || m_sym->isStatic()) return true;
   if (getScope()->inPseudoMain() && !m_sym->isHidden()) return true;
   if (isReferencedValid()) return isReferenced();
@@ -91,8 +96,8 @@ bool SimpleVariable::isHidden() const {
 }
 
 void SimpleVariable::coalesce(SimpleVariablePtr other) {
-  assert(m_sym);
-  assert(other->m_sym);
+  always_assert(m_sym);
+  always_assert(other->m_sym);
   if (!m_originalSym) m_originalSym = m_sym;
   m_sym->clearUsed();
   m_sym->clearNeeded();
@@ -116,7 +121,7 @@ string SimpleVariable::getNamePrefix() const {
 */
 bool SimpleVariable::canKill(bool isref) const {
   if (m_globals || m_superGlobal) return false;
-  assert(m_sym);
+  always_assert(m_sym);
   if (m_sym->isGlobal() || m_sym->isStatic()) {
     return isref && !getScope()->inPseudoMain();
   }
@@ -147,10 +152,11 @@ void SimpleVariable::analyzeProgram(AnalysisResultPtr ar) {
         func->setContainsThis();
         m_this = true;
         if (!hasContext(ObjectContext)) {
+          bool unset = hasAllContext(UnsetContext | LValue);
           func->setContainsBareThis(
             true,
             hasAnyContext(RefValue | RefAssignmentLHS) ||
-            m_sym->isRefClosureVar());
+            m_sym->isRefClosureVar() || unset);
           if (variables->getAttribute(VariableTable::ContainsDynamicVariable)) {
             ClassScopePtr cls = getClassScope();
             TypePtr t = !cls || cls->isRedeclaring() ?

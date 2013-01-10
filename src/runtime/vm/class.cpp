@@ -22,7 +22,6 @@
 #include <algorithm>
 
 #include "runtime/base/base_includes.h"
-#include "runtime/base/tv_macros.h"
 #include "util/util.h"
 #include "util/debug.h"
 #include "runtime/vm/core_types.h"
@@ -30,6 +29,7 @@
 #include "runtime/vm/class.h"
 #include "runtime/vm/repo.h"
 #include "runtime/vm/translator/targetcache.h"
+#include "runtime/vm/translator/translator.h"
 #include "runtime/vm/blob_helper.h"
 #include "runtime/vm/treadmill.h"
 #include "runtime/vm/name_value_table.h"
@@ -47,6 +47,11 @@ static StringData* sd86sinit = StringData::GetStaticString("86sinit");
 
 hphp_hash_map<const StringData*, const HhbcExtClassInfo*,
               string_data_hash, string_data_isame> Class::s_extClassHash;
+Class::InstanceCounts Class::s_instanceCounts;
+ReadWriteMutex Class::s_instanceCountsLock(RankInstanceCounts);
+Class::InstanceBitsMap Class::s_instanceBits;
+ReadWriteMutex Class::s_instanceBitsLock(RankInstanceBits);
+bool Class::s_instanceBitsInit = false;
 
 static const StringData* manglePropName(const StringData* className,
                                         const StringData* propName,
@@ -476,7 +481,7 @@ void PreClassRepoProxy::GetPreClassesStmt
 ClassPtr Class::newClass(PreClass* preClass, Class* parent) {
   unsigned classVecLen = (parent != NULL) ? parent->m_classVecLen+1 : 1;
   void* mem = Util::low_malloc(sizeForNClasses(classVecLen));
-  assert(IMPLIES(alwaysLowMem(), ptr_is_low_mem(mem)) &&
+  always_assert(IMPLIES(alwaysLowMem(), ptr_is_low_mem(mem)) &&
          "All Classes must be allocated at 32-bit addresses");
   try {
     return ClassPtr(new (mem) Class(preClass, parent, classVecLen));
@@ -562,6 +567,118 @@ bool Class::verifyPersistent() const {
       return false;
     }
   }
+  return true;
+}
+
+/*
+ * Initializes s_instanceBits based on data collected during any warmup
+ * requests that have happened so far. Must only be called while holding the
+ * write lease.
+ */
+void Class::initInstanceBits() {
+  ASSERT(Transl::Translator::WriteLease().amOwner());
+  if (s_instanceBitsInit) return;
+
+  // First, grab a write lock on s_instanceCounts and grab the current set of
+  // counts as quickly as possible to minimize blocking other threads still
+  // trying to profile instance checks.
+  typedef std::pair<const StringData*, unsigned> Count;
+  std::vector<Count> counts;
+  uint64 total = 0;
+  {
+    // If you think of the read-write lock as a shared-exclusive lock instead,
+    // the fact that we're grabbing a write lock to iterate over the table
+    // makes more sense: it's safe to concurrently modify a
+    // tbb::concurrent_hash_map, but iteration is not guaranteed to be safe
+    // with concurrent insertions.
+    WriteLock l(s_instanceCountsLock);
+    for (auto& pair : s_instanceCounts) {
+      counts.push_back(pair);
+      total += pair.second;
+    }
+  }
+  std::sort(counts.begin(), counts.end(), [&](const Count& a, const Count& b) {
+    return a.second > b.second;
+  });
+
+  // Next, initialize s_instanceBits with the top 127 most checked classes. Bit
+  // 0 is reserved as an 'initialized' flag
+  unsigned i = 1;
+  uint64 accum = 0;
+  for (auto& item : counts) {
+    if (i >= kInstanceBits) break;
+    s_instanceBits[item.first] = i;
+    accum += item.second;
+    ++i;
+  }
+
+  // Print out stats about what we ended up using
+  if (Trace::moduleEnabledRelease(Trace::instancebits, 1)) {
+    Trace::traceRelease("%s: %u classes, %u (%.2f%%) of warmup checks\n",
+                        __FUNCTION__, i-1, accum, 100.0 * accum / total);
+    if (Trace::moduleEnabledRelease(Trace::instancebits, 2)) {
+      accum = 0;
+      i = 1;
+      for (auto& pair : counts) {
+        if (i >= 256) {
+          Trace::traceRelease("skipping the remainder of the %llu classes\n",
+                              counts.size());
+          break;
+        }
+        accum += pair.second;
+        Trace::traceRelease("%3u %5.2f%% %7u -- %6.2f%% %7u %s\n",
+                            i++, 100.0 * pair.second / total, pair.second,
+                            100.0 * accum / total, accum,
+                            pair.first->data());
+      }
+    }
+  }
+
+  // Finally, update m_instanceBits on every Class that currently exists. This
+  // must be done while holding a lock that blocks insertion of new Classes
+  // into their class lists, but in practice most Classes will already be
+  // created by now and this process takes at most 10ms.
+  WriteLock l(s_instanceBitsLock);
+  for (AllClasses ac; !ac.empty(); ) {
+    Class* c = ac.popFront();
+    c->setInstanceBitsAndParents();
+  }
+
+  atomic_release_store(&s_instanceBitsInit, true);
+}
+
+void Class::profileInstanceOf(const StringData* name) {
+  ASSERT(name->isStatic());
+  unsigned inc = 1;
+  Class* c = Unit::lookupClass(name);
+  if (c && (c->attrs() & AttrInterface)) {
+    // Favor traits and interfaces
+    inc = 250;
+  }
+  InstanceCounts::accessor acc;
+
+  // The extra layer of locking is here so that initInstanceBits can safely
+  // iterate over s_instanceCounts while building its map of names to bits.
+  ReadLock l(s_instanceCountsLock);
+  if (!s_instanceCounts.insert(acc, InstanceCounts::value_type(name, inc))) {
+    acc->second += inc;
+  }
+}
+
+bool Class::haveInstanceBit(const StringData* name) {
+  ASSERT(s_instanceBitsInit);
+  return mapContains(s_instanceBits, name);
+}
+
+bool Class::getInstanceBitMask(const StringData* name,
+                               int& offset, uint8& mask) {
+  ASSERT(s_instanceBitsInit);
+  const size_t bitWidth = sizeof(mask) * CHAR_BIT;
+  unsigned bit;
+  if (!mapGet(s_instanceBits, name, &bit)) return false;
+  ASSERT(bit >= 1 && bit < kInstanceBits);
+  offset = offsetof(Class, m_instanceBits) + bit / bitWidth * sizeof(mask);
+  mask = 1u << (bit % bitWidth);
   return true;
 }
 
@@ -652,9 +769,7 @@ Class* Class::classof(const PreClass* preClass) const {
 void Class::initialize(TypedValue*& sProps) const {
   if (m_pinitVec.size() > 0) {
     if (getPropData() == NULL) {
-      // Initialization was not done, do so for the first time.
-      PropInitVec* props = initProps();
-      setPropData(props);
+      initProps();
     }
   }
   // The asymmetry between the logic around initProps() above and initSProps()
@@ -664,7 +779,6 @@ void Class::initialize(TypedValue*& sProps) const {
   if (numStaticProperties() > 0) {
     if ((sProps = getSPropData()) == NULL) {
       sProps = initSProps();
-      setSPropData(sProps);
     }
   } else {
     sProps = NULL;
@@ -676,8 +790,9 @@ void Class::initialize() const {
   initialize(sProps);
 }
 
-Class::PropInitVec* Class::initProps() const {
+Class::PropInitVec* Class::initPropsImpl() const {
   ASSERT(m_pinitVec.size() > 0);
+  ASSERT(getPropData() == NULL);
   // Copy initial values for properties to a new vector that can be used to
   // complete initialization for non-scalar properties via the iterative
   // 86pinit() calls below.  86pinit() takes a reference to an array that
@@ -689,6 +804,14 @@ Class::PropInitVec* Class::initProps() const {
 
   // During property initialization, we provide access to the
   // properties by name via this NameValueTable.
+
+  // Note that constructing these on the stack is slightly
+  // risky; we're relying on nobody getting hold of references
+  // to them. Also note that the ASSERT on the refCount below
+  // is quite inadequate; the only way for these to leak is if
+  // an error occurs - but in that case, we wont reach the ASSERT
+  // However, since we dont /want/ these to leak into the backtrace,
+  // we prevent it by setting AttrNoInjection (see Func::init)
   NameValueTable propNvt(numDeclProperties());
   NameValueTableWrapper propArr(&propNvt);
   propArr.incRefCount();
@@ -704,7 +827,7 @@ Class::PropInitVec* Class::initProps() const {
     tv.m_data.parr = &propArr;
     tv._count = 0;
     tv.m_type = KindOfArray;
-    args->nvAppend(&tv, false);
+    args->nvAppend(&tv);
     propArr.decRefCount();
   }
   {
@@ -712,7 +835,7 @@ Class::PropInitVec* Class::initProps() const {
     tv.m_data.pobj = sentinel;
     tv._count = 0;
     tv.m_type = KindOfObject;
-    args->nvAppend(&tv, false);
+    args->nvAppend(&tv);
     sentinel->decRefCount();
   }
   TypedValue* tvSentinel = args->nvGetValueRef(1);
@@ -750,11 +873,8 @@ Class::PropInitVec* Class::initProps() const {
   // Free the args array.  propArr is allocated on the stack so it
   // better be only referenced from args.
   ASSERT(propArr.getCount() == 1);
-  if (args->decRefCount() == 0) {
-    args->release();
-  } else {
-    ASSERT(false);
-  }
+  ASSERT(args->getCount() == 1);
+  decRefArr(args);
   return propVec;
 }
 
@@ -842,8 +962,9 @@ Slot Class::getDeclPropIndex(Class* ctx, const StringData* key,
   return propInd;
 }
 
-TypedValue* Class::initSProps() const {
+TypedValue* Class::initSPropsImpl() const {
   ASSERT(numStaticProperties() > 0);
+  ASSERT(getSPropData() == NULL);
   // Create an array that is initially large enough to hold all static
   // properties.
   TypedValue* const spropTable =
@@ -882,29 +1003,38 @@ TypedValue* Class::initSProps() const {
 
   // Invoke 86sinit's if necessary, to handle non-scalar initializers.
   if (hasNonscalarInit) {
+    // See note in initPropsImpl for why its ok to allocate
+    // this on the stack.
     NameValueTableWrapper nvtWrapper(&*nvt);
     nvtWrapper.incRefCount();
 
     HphpArray* args = NEW(HphpArray)(1);
     args->incRefCount();
-    {
-      TypedValue tv;
-      tv.m_data.parr = &nvtWrapper;
-      tv._count = 0;
-      tv.m_type = KindOfArray;
-      args->nvAppend(&tv, false);
+    try {
+      {
+        TypedValue tv;
+        tv.m_data.parr = &nvtWrapper;
+        tv._count = 0;
+        tv.m_type = KindOfArray;
+        args->nvAppend(&tv);
+      }
+      for (unsigned i = 0; i < m_sinitVec.size(); i++) {
+        TypedValue retval;
+        g_vmContext->invokeFunc(&retval, m_sinitVec[i], args, NULL,
+                                const_cast<Class*>(this));
+        ASSERT(!IS_REFCOUNTED_TYPE(retval.m_type));
+      }
+      // Release the args array.  nvtWrapper is on the stack, so it
+      // better have a single reference.
+      ASSERT(args->getCount() == 1);
+      args->release();
+      ASSERT(nvtWrapper.getCount() == 1);
+    } catch (...) {
+      ASSERT(args->getCount() == 1);
+      args->release();
+      ASSERT(nvtWrapper.getCount() == 1);
+      throw;
     }
-    for (unsigned i = 0; i < m_sinitVec.size(); i++) {
-      TypedValue retval;
-      g_vmContext->invokeFunc(&retval, m_sinitVec[i], args, NULL,
-                              const_cast<Class*>(this));
-      ASSERT(!IS_REFCOUNTED_TYPE(retval.m_type));
-    }
-    // Release the args array.  nvtWrapper is on the stack, so it
-    // better have a single reference.
-    ASSERT(args->getCount() == 1);
-    args->release();
-    ASSERT(nvtWrapper.getCount() == 1);
   }
 
   return spropTable;
@@ -1140,7 +1270,7 @@ void Class::setSpecial() {
   // Use 86ctor(), since no program-supplied constructor exists
   m_ctor = findSpecialMethod(this, sd86ctor);
   ASSERT(m_ctor && "class had no user-defined constructor or 86ctor");
-  ASSERT(m_ctor->attrs() == AttrPublic);
+  ASSERT(m_ctor->attrs() == (AttrPublic|AttrNoInjection));
 }
 
 void Class::applyTraitPrecRule(const PreClass::TraitPrecRule& rule) {
@@ -1479,7 +1609,7 @@ void Class::setMethods() {
       Func* f = m_parent->m_methods[i];
       ASSERT(f);
       if ((f->attrs() & AttrClone) ||
-          !(f->attrs() & AttrPrivate) && f->hasStaticLocals()) {
+          (!(f->attrs() & AttrPrivate) && f->hasStaticLocals())) {
         // When copying down an entry for a non-private method that has
         // static locals, we want to make a copy of the Func so that it
         // gets a distinct set of static locals variables. We defer making
@@ -1704,7 +1834,7 @@ void Class::setProperties() {
       sProp.m_attrs = parentProp.m_attrs;
       sProp.m_docComment = parentProp.m_docComment;
       sProp.m_class = parentProp.m_class;
-      TV_WRITE_UNINIT(&sProp.m_val);
+      tvWriteUninit(&sProp.m_val);
       curSPropMap.add(sProp.m_name, sProp);
     }
   }
@@ -2138,6 +2268,35 @@ void Class::setClassVec() {
   m_classVec[m_classVecLen-1] = this;
 }
 
+void Class::setInstanceBits() {
+  setInstanceBitsImpl<false>();
+}
+void Class::setInstanceBitsAndParents() {
+  setInstanceBitsImpl<true>();
+}
+
+template<bool setParents>
+void Class::setInstanceBitsImpl() {
+  // Bit 0 is reserved to indicate whether or not the rest of the bits
+  // are initialized yet.
+  if (m_instanceBits.test(0)) return;
+
+  InstanceBits bits;
+  bits.set(0);
+  auto setBits = [&](ClassPtr& c) {
+    if (setParents) c->setInstanceBitsAndParents();
+    bits |= c->m_instanceBits;
+  };
+  if (m_parent.get()) setBits(m_parent);
+  std::for_each(m_declInterfaces.begin(), m_declInterfaces.end(), setBits);
+
+  unsigned bit;
+  if (mapGet(s_instanceBits, m_preClass->name(), &bit)) {
+    bits.set(bit);
+  }
+  m_instanceBits = bits;
+}
+
 // Finds the base class defining the given method (NULL if none).
 // Note: for methods imported via traits, the base class is the one that
 // uses/imports the trait.
@@ -2365,12 +2524,20 @@ const Class::PropInitVec* Class::getPropData() const {
   return handleToRef<PropInitVec*>(m_propDataCache);
 }
 
-void Class::setPropData(PropInitVec* propData) const {
-  ASSERT(getPropData() == NULL);
+void Class::initPropHandle() const {
   if (UNLIKELY(m_propDataCache == (unsigned)-1)) {
     const_cast<unsigned&>(m_propDataCache) =
       Transl::TargetCache::allocClassInitProp(name());
   }
+}
+
+void Class::initProps() const {
+  setPropData(initPropsImpl());
+}
+
+void Class::setPropData(PropInitVec* propData) const {
+  ASSERT(getPropData() == NULL);
+  initPropHandle();
   handleToRef<PropInitVec*>(m_propDataCache) = propData;
 }
 
@@ -2379,12 +2546,22 @@ TypedValue* Class::getSPropData() const {
   return handleToRef<TypedValue*>(m_propSDataCache);
 }
 
-void Class::setSPropData(TypedValue* sPropData) const {
-  ASSERT(getSPropData() == NULL);
+void Class::initSPropHandle() const {
   if (UNLIKELY(m_propSDataCache == (unsigned)-1)) {
     const_cast<unsigned&>(m_propSDataCache) =
       Transl::TargetCache::allocClassInitSProp(name());
   }
+}
+
+TypedValue* Class::initSProps() const {
+  TypedValue* sprops = initSPropsImpl();
+  setSPropData(sprops);
+  return sprops;
+}
+
+void Class::setSPropData(TypedValue* sPropData) const {
+  ASSERT(getSPropData() == NULL);
+  initSPropHandle();
   handleToRef<TypedValue*>(m_propSDataCache) = sPropData;
 }
 

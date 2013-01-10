@@ -21,22 +21,26 @@
 
 #include <runtime/vm/bytecode.h>
 #include <runtime/vm/translator/translator.h>
-#include <runtime/vm/translator/asm-x64.h>
+#include <util/asm-x64.h>
 #include <runtime/vm/translator/srcdb.h>
 #include <runtime/vm/translator/unwind-x64.h>
 #include <runtime/vm/translator/regalloc.h>
 #include <tbb/concurrent_hash_map.h>
 #include <util/ringbuffer.h>
 #include <runtime/vm/debug/debug.h>
-#include <runtime/vm/translator/hopt/hhbctranslator.h>
 #include "runtime/vm/translator/abi-x64.h"
 
-namespace HPHP {
+namespace HPHP { class ExecutionContext; }
 
-class ExecutionContext;
+namespace HPHP { namespace VM { namespace JIT {
+class HhbcTranslator;
+class IRFactory;
+class CSEHash;
+class TraceBuilder;
+class CodeGenerator;
+}}}
 
-namespace VM {
-namespace Transl {
+namespace HPHP { namespace VM { namespace Transl {
 
 class IRTranslator;
 class MVecTransState;
@@ -72,6 +76,10 @@ extern void* interpOneEntryPoints[];
 
 extern "C" TCA funcBodyHelper(ActRec* fp);
 
+struct Call;
+struct TReqInfo;
+struct Label;
+
 class TranslatorX64 : public Translator
                     , SpillFill
                     , boost::noncopyable {
@@ -87,10 +95,10 @@ class TranslatorX64 : public Translator
   friend class HPHP::VM::JIT::CodeGenerator;
   friend class HPHP::VM::JIT::HhbcTranslator; // packBitVec()
   friend TCA funcBodyHelper(ActRec* fp);
-  template<int, int, int> friend class CondBlock;
+  template<int, int, ConditionCode> friend class CondBlock;
   template<ConditionCode, typename smasher> friend class JccBlock;
-  template<int> friend class IfElseBlock;
-  template<int> friend class UnlikelyIfBlock;
+  template<ConditionCode> friend class IfElseBlock;
+  friend class UnlikelyIfBlock;
   typedef HPHP::DataType DataType;
 
   typedef tbb::concurrent_hash_map<TCA, TCA> SignalStubMap;
@@ -117,12 +125,18 @@ class TranslatorX64 : public Translator
   TCA                    m_retHelper;
   TCA                    m_genRetHelper;
   TCA                    m_stackOverflowHelper;
+  TCA                    m_irPopRHelper;
   TCA                    m_dtorGenericStub;
   TCA                    m_dtorGenericStubRegs;
-  TCA                    m_dtorStubs[MaxNumDataTypes];
+  TCA                    m_dtorStubs[kDestrTableSize];
   TCA                    m_interceptHelper;
   TCA                    m_defClsHelper;
   TCA                    m_funcPrologueRedispatch;
+
+  static const int kNumFreeLocalsHelpers = 9;
+  TCA                    m_freeManyLocalsHelper;
+  TCA                    m_freeLocalsHelpers[kNumFreeLocalsHelpers];
+
   DataBlock              m_globalData;
   size_t                 m_irAUsage;
   size_t                 m_irAstubsUsage;
@@ -136,7 +150,7 @@ class TranslatorX64 : public Translator
   IRTranslator*          m_irTrans;
 
   void hhirTraceStart(Offset bcStartOffset);
-  void hhirTraceCodeGen();
+  void hhirTraceCodeGen(vector<TransBCMapping>* bcMap);
   void hhirTraceEnd(Offset bcSuccOffset);
   void hhirTraceFree();
 
@@ -167,6 +181,7 @@ public:
   int m_curLine;
   litstr m_curFunc;
 private:
+  int64 m_createdTime;
 
   struct PendingFixup {
     TCA m_tca;
@@ -189,7 +204,7 @@ private:
     return m_regMap.getReg(dl.location);
   }
 
-  Asm &getAsmFor(TCA addr) { return Asm::Choose(a, astubs, addr); }
+  Asm& getAsmFor(TCA addr) { return asmChoose(addr, a, astubs); }
   void emitIncRef(PhysReg base, DataType);
   void emitIncRefGenericRegSafe(PhysReg base, int disp, PhysReg tmp);
   void emitIncRefGeneric(PhysReg base, int disp = 0);
@@ -245,11 +260,13 @@ private:
                                 const NormalizedInstruction& i,
                                 Attr typeAttr);
   void recordSyncPoint(Asm& a, Offset pcOff, Offset spOff);
+  void recordIndirectFixup(CTCA addr, int dwordsPushed);
   template <bool reentrant>
   void recordCallImpl(Asm& a, const NormalizedInstruction& i,
-                      bool advance = false);
-  void recordReentrantCall(Asm& a, const NormalizedInstruction& i) {
-    recordCallImpl<true>(a, i);
+                      bool advance = false, int adjust = 0);
+  void recordReentrantCall(Asm& a, const NormalizedInstruction& i,
+                           bool advance = false, int adjust = 0) {
+    recordCallImpl<true>(a, i, advance, adjust);
   }
   void recordReentrantCall(const NormalizedInstruction& i) {
     recordCallImpl<true>(a, i);
@@ -267,7 +284,7 @@ private:
   void emitStringToClass(const NormalizedInstruction& i);
   void emitKnownClassCheck(const NormalizedInstruction& i,
                            const StringData* clssName,
-                           register_name_t reg);
+                           RegNumber reg);
   void emitStringToKnownClass(const NormalizedInstruction& i,
                               const StringData* clssName);
   void emitObjToClass(const NormalizedInstruction& i);
@@ -281,20 +298,12 @@ private:
     return a.code.isValidAddress(tca) || astubs.code.isValidAddress(tca) ||
       atrampolines.code.isValidAddress(tca);
   }
-  struct Call {
-    enum { Direct, Virtual } m_kind;
-    union {
-      void* m_fptr;
-      int   m_offset;
-    };
-    explicit Call(void *p) : m_kind(Direct), m_fptr(p) {}
-    explicit Call(int off) : m_kind(Virtual), m_offset(off) {}
-    void emit(Asm& a, PhysReg scratch);
-  };
   template<int Arity> TCA emitNAryStub(Asm& a, Call c);
   TCA emitUnaryStub(Asm& a, Call c);
   TCA genericRefCountStub(Asm& a);
   TCA genericRefCountStubRegs(Asm& a);
+  void emitFreeLocalsHelpers();
+  void emitGenericDecRefHelpers();
   TCA getCallArrayProlog(Func* func);
   TCA emitPrologueRedispatch(Asm &a);
   TCA emitFuncGuard(Asm& a, const Func *f);
@@ -313,16 +322,23 @@ private:
                       PhysReg arg1, PhysReg arg2);
   void emitDerefStoreToLoc(PhysReg srcReg, const Location& destLoc);
 
+  void getInputsIntoXMMRegs(const NormalizedInstruction& ni,
+                            PhysReg lr, PhysReg rr,
+                            RegXMM lxmm, RegXMM rxmm);
   void binaryIntegerArith(const NormalizedInstruction &i,
                           Opcode op, PhysReg srcReg, PhysReg srcDestReg);
+  void binaryMixedArith(const NormalizedInstruction &i,
+                         Opcode op, PhysReg srcReg, PhysReg srcDestReg);
   void binaryArithCell(const NormalizedInstruction &i,
-                       Opcode op, const DynLocation& in1,
+                       Opcode op,
+                       const DynLocation& in1,
                        const DynLocation& inout);
   void binaryArithLocal(const NormalizedInstruction &i,
                         Opcode op,
                         const DynLocation& in1,
                         const DynLocation& in2,
                         const DynLocation& out);
+  void fpEq(const NormalizedInstruction& i, PhysReg lr, PhysReg rr);
   void emitRB(Asm& a, Trace::RingBufferType t, SrcKey sk,
               RegSet toSave = RegSet());
   void emitRB(Asm& a, Trace::RingBufferType t, const char* msgm,
@@ -342,7 +358,15 @@ private:
     // make a call into the tc, so this first element is padding for
     // the return address pushed by the call.
     uintptr_t returnAddress;
-    TypedValue tvScratch;
+    uintptr_t padding; // keep the following TV's SSE friendly.
+    union {
+      // This space is used for both vector instructions and
+      // the return value of builtin functions that return by reference.
+      // Since we don't ever use the two at the same time, it is
+      // OK to use a union.
+      TypedValue tvScratch;
+      TypedValue tvBuiltinReturn;
+    };
     TypedValue tvRef;
     TypedValue tvRef2;
     TypedValue tvResult;
@@ -350,6 +374,8 @@ private:
     bool baseStrOff;
     Class* ctx;
   } __attribute__((aligned(16)));
+  static_assert(offsetof(MInstrState, tvScratch) % 16 == 0,
+                "MInstrState members require 16-byte alignment for SSE");
   static_assert(sizeof(TranslatorX64::MInstrState)
                     - sizeof(uintptr_t) // return address
                   < kReservedRSPScratchSpace,
@@ -455,18 +481,17 @@ private:
                 unsigned& iInd, LazyScratchReg& rBase);
   void emitMPost(const Tracelet& t, const NormalizedInstruction& ni,
                  const MInstrInfo& mii);
+  void translateMInstr(Op op);
+  void emitFinalMOp(const Tracelet& t, const NormalizedInstruction& ni,
+                    const MInstrInfo& mii, unsigned mInd, unsigned iInd,
+                    LazyScratchReg& rBase);
 #define MII(instr, attrs, bS, iS, vC, fN) \
   void emit##instr##Elem(const Tracelet& t, const NormalizedInstruction& ni, \
                          const MInstrInfo& mii, unsigned mInd, unsigned iInd, \
                          PhysReg rBase); \
   void emit##instr##Prop(const Tracelet& t, const NormalizedInstruction& ni, \
                          const MInstrInfo& mii, unsigned mInd, \
-                         unsigned iInd, LazyScratchReg& rBase); \
-  void emitFinal##instr##MOp(const Tracelet& t, \
-                             const NormalizedInstruction& ni, \
-                             const MInstrInfo& mii, \
-                             unsigned mInd, unsigned iInd, \
-                             LazyScratchReg& rBase);
+                         unsigned iInd, LazyScratchReg& rBase);
 MINSTRS
 #undef MII
 
@@ -476,16 +501,21 @@ MINSTRS
   CASE(PopR) \
   CASE(UnboxR) \
   CASE(Null) \
+  CASE(NullUninit) \
   CASE(True) \
   CASE(False) \
   CASE(Int) \
+  CASE(Double) \
   CASE(String) \
   CASE(Array) \
   CASE(NewArray) \
   CASE(NewTuple) \
+  CASE(NewCol) \
   CASE(Nop) \
   CASE(AddElemC) \
   CASE(AddNewElemC) \
+  CASE(ColAddElemC) \
+  CASE(ColAddNewElemC) \
   CASE(Cns) \
   CASE(DefCns) \
   CASE(ClsCnsD) \
@@ -496,9 +526,13 @@ MINSTRS
   CASE(BitNot) \
   CASE(CastInt) \
   CASE(CastString) \
+  CASE(CastDouble) \
+  CASE(CastArray) \
+  CASE(CastObject) \
   CASE(Print) \
   CASE(Jmp) \
   CASE(Switch) \
+  CASE(SSwitch) \
   CASE(RetC) \
   CASE(RetV) \
   CASE(NativeImpl) \
@@ -543,13 +577,14 @@ MINSTRS
   CASE(InitThisLoc) \
   CASE(FCall) \
   CASE(FCallArray) \
+  CASE(FCallBuiltin) \
   CASE(VerifyParamType) \
   CASE(InstanceOfD) \
   CASE(StaticLocInit) \
   CASE(IterInit) \
-  CASE(IterValueC) \
-  CASE(IterKey) \
+  CASE(IterInitK) \
   CASE(IterNext) \
+  CASE(IterNextK) \
   CASE(ReqDoc) \
   CASE(ReqMod) \
   CASE(ReqSrc) \
@@ -576,7 +611,8 @@ MINSTRS
   CASE(ContCurrent) \
   CASE(ContStopped) \
   CASE(ContHandle) \
-  CASE(Strlen)
+  CASE(Strlen) \
+  CASE(IncStat) \
 
   // These are instruction-like functions which cover more than one
   // opcode.
@@ -622,12 +658,6 @@ PSEUDOINSTRS
   void fuseBranchAfterHelper(const Tracelet& t,
                              const NormalizedInstruction& i);
   void translateSetMArray(const Tracelet &t, const NormalizedInstruction& i);
-  void emitPropGet(const NormalizedInstruction& i,
-                   const DynLocation& base,
-                   PhysReg fieldAddr,
-                   const Location& outLoc);
-  void translateCGetM_LEE(const Tracelet &t, const NormalizedInstruction& i);
-  void translateCGetM_GE(const Tracelet &t, const NormalizedInstruction& i);
   void emitGetGlobal(const NormalizedInstruction& i, int nameIdx,
                      bool allowCreate);
   void emitArrayElem(const NormalizedInstruction& i,
@@ -635,21 +665,26 @@ PSEUDOINSTRS
                      PhysReg baseReg,
                      const DynLocation* keyIn,
                      const Location& outLoc);
-  void translateIssetMSimple(const Tracelet& t,
-                             const NormalizedInstruction& ni);
+  void translateIssetMFast(const Tracelet& t,
+                           const NormalizedInstruction& ni);
   void setupActRecClsForStaticCall(const NormalizedInstruction& i,
                                    const Func* func, const Class* cls,
                                    size_t clsOff, bool forward);
   void emitInstanceCheck(const Tracelet& t, const NormalizedInstruction& i,
+                         const StringData* clsName,
                          const Class* maybeCls,
                          const ScratchReg& inCls,
                          const ScratchReg& cls,
                          const LazyScratchReg& result);
-
+  void emitFPushCtorDFast(const NormalizedInstruction& i, Class* cls,
+                          int arOff);
+  template<typename L>
+  void translatorAssert(X64Assembler& a, ConditionCode cc,
+                        const char* msg, L setup);
 
   const Func* findCuf(const NormalizedInstruction& ni,
                       Class* &cls, StringData*& invName, bool& forward);
-  static void toStringHelper(ObjectData *obj);
+  static uint64_t toStringHelper(ObjectData *obj);
   void invalidateSrcKey(const SrcKey& sk);
   bool dontGuardAnyInputs(Opcode op);
  public:
@@ -766,29 +801,39 @@ private:
   void irTranslateInstrDefault(const Tracelet& t,
                                const NormalizedInstruction& i);
   bool checkTranslationLimit(const SrcKey&, const SrcRec&) const;
-  void translateTracelet(const Tracelet& t);
-  bool irTranslateTracelet(const Tracelet& t,
-                           const TCA       start,
-                           const TCA       stubStart);
-  void emitStringCheck(Asm& _a, PhysReg base, int offset, PhysReg tmp);
+  bool translateTracelet(const Tracelet& t);
+  bool irTranslateTracelet(const Tracelet&         t,
+                           const TCA               start,
+                           const TCA               stubStart,
+                           vector<TransBCMapping>* bcMap);
+  void irPassPredictedAndInferredTypes(const NormalizedInstruction& i);
+
+  void emitStringCheck(Asm& _a, PhysReg base, int offset);
   void emitTypeCheck(Asm& _a, DataType dt,
                      PhysReg base, int offset,
-                     PhysReg tmp = InvalidReg);
+                     SrcRec* fail = NULL);
   void irAssertType(const Location& l, const RuntimeType& rtt);
   void checkType(Asm&, const Location& l, const RuntimeType& rtt,
     SrcRec& fail);
   void irCheckType(Asm&, const Location& l, const RuntimeType& rtt,
                    SrcRec& fail);
+  void irEmitLoadDeps();
+
   void checkRefs(Asm&, const SrcKey&, const RefDeps&, SrcRec&);
 
-  void emitFrameRelease(Asm& a, const NormalizedInstruction& i,
-                        bool noThis = false);
+  void emitDecRefThis(const ScratchReg& tmpReg);
+  void emitVVRet(const ScratchReg&, Label& extraArgsReturn,
+                 Label& varEnvReturn);
+  void emitInlineReturn(Location retvalSrcLoc, int retvalSrcDisp);
+  void emitGenericReturn(bool noThis, int retvalSrcDisp);
   void dumpStack(const char* msg, int offset) const;
 
   static const size_t kJmpTargetAlign = 16;
   static const size_t kNonFallthroughAlign = 64;
   static const int kJmpLen = 5;
+  static const int kCallLen = 5;
   static const int kJmpccLen = 6;
+  static const int kJmpImmBytes = 4;
   static const int kJcc8Len = 3;
   static const int kLeaRipLen = 7;
   static const int kTestRegRegLen = 3;
@@ -801,14 +846,28 @@ private:
  private:
   void moveToAlign(Asm &aa, const size_t alignment = kJmpTargetAlign,
                    const bool unreachable = true);
-  void prepareForTestAndSmash(int testBytes, int jccBytes);
-  void prepareForSmash(Asm &a, int nBytes);
-  void prepareForSmash(int nBytes);
-  static bool isSmashable(Address frontier, int nBytes);
-  static void smash(Asm &a, TCA src, TCA dest);
+  enum TestAndSmashFlags {
+    kAlignJccImmediate,
+    kAlignJcc,
+    kAlignJccAndJmp
+  };
+  void prepareForTestAndSmash(int testBytes, TestAndSmashFlags flags);
+  void prepareForSmash(Asm &a, int nBytes, int offset = 0);
+  void prepareForSmash(int nBytes, int offset = 0);
+  static bool isSmashable(Address frontier, int nBytes, int offset = 0);
+  static void smash(Asm &a, TCA src, TCA dest, bool isCall);
+  static void smashJmp(Asm &a, TCA src, TCA dest) {
+    smash(a, src, dest, false);
+  }
+  static void smashCall(Asm &a, TCA src, TCA dest) {
+    smash(a, src, dest, true);
+  }
 
-  TCA getTranslation(const SrcKey *sk, bool align, bool forceNoHHIR = false);
+  TCA getTranslation(const SrcKey* sk, bool align, bool forceNoHHIR = false);
+  TCA createTranslation(const SrcKey* sk, bool align,
+                        bool forceNoHHIR = false);
   TCA lookupTranslation(const SrcKey& sk) const;
+  TCA translate(const SrcKey *sk, bool align, bool useHHIR);
   TCA retranslate(SrcKey sk, bool align, bool useHHIR);
   TCA retranslateOpt(TransID transId, bool align);
   TCA retranslateAndPatchNoIR(SrcKey sk,
@@ -823,17 +882,28 @@ private:
   TCA bindJmpccSecond(TCA toSmash, const Offset off,
                       ConditionCode cc,
                       bool& smashed);
-  void emitFallbackJmp(SrcRec& dest);
-  void emitFallbackJmp(Asm& as, SrcRec& dest);
+  void emitFallbackJmp(SrcRec& dest, ConditionCode cc = CC_NZ);
+  void emitFallbackJmp(Asm& as, SrcRec& dest, ConditionCode cc = CC_NZ);
   void emitFallbackUncondJmp(Asm& as, SrcRec& dest);
+  void emitFallbackCondJmp(Asm& as, SrcRec& dest, ConditionCode cc);
   void emitDebugPrint(Asm&, const char*,
                       PhysReg = reg::r13,
                       PhysReg = reg::r14,
                       PhysReg = reg::rax);
+  void emitCheckUncounted(X64Assembler& a,
+                          PhysReg       baseReg,
+                          int           offset,
+                          SrcRec&       fail);
+  void emitCheckUncountedInit(X64Assembler& a,
+                              PhysReg       baseReg,
+                              int           offset,
+                              SrcRec&       fail);
+
   enum SRFlags {
     SRNone = 0,
     SRAlign = 1,
     SRInline = 2,
+    SRJmpInsteadOfRet = 4
   };
   TCA emitServiceReq(ServiceRequest, int numArgs, ...);
   TCA emitServiceReq(SRFlags flags, ServiceRequest, int numArgs, ...);
@@ -843,17 +913,14 @@ private:
   TCA emitRetFromInterpretedFrame();
   TCA emitRetFromInterpretedGeneratorFrame();
   TCA emitGearTrigger(Asm& a, const SrcKey& sk, TransID transId);
+  void emitPopRetIntoActRec(Asm& a);
   void emitBox(DataType t, PhysReg rToBox);
   void emitUnboxTopOfStack(const NormalizedInstruction& ni);
-  int32_t emitBindCall(const Tracelet& t, const NormalizedInstruction &ni,
-                       Offset atCall, Offset after);
+  int32_t emitBindCall(SrcKey srcKey, const Func* funcd, int numArgs);
   void emitCondJmp(const SrcKey &skTrue, const SrcKey &skFalse,
                    ConditionCode cc);
   void emitInterpOne(const Tracelet& t, const NormalizedInstruction& i);
-  void emitMovRegReg(Asm& a, PhysReg src, PhysReg dest);
-  void emitMovRegReg(PhysReg src, PhysReg dest);
-  void emitMovRegReg32(Asm& a, PhysReg src, PhysReg dest);
-  void enterTC(SrcKey sk);
+  bool handleServiceRequest(TReqInfo&, TCA& start, SrcKey& sk);
 
   void recordGdbTranslation(const SrcKey& sk, const Unit* u,
                             const Asm& a,
@@ -864,9 +931,8 @@ private:
 
   void emitStackCheck(int funcDepth, Offset pc);
   void emitStackCheckDynamic(int numArgs, Offset pc);
-  void emitTestSurpriseFlags();
-  void emitCheckSurpriseFlagsEnter(bool inTracelet, Offset pcOff,
-                                   Offset stackOff);
+  void emitTestSurpriseFlags(Asm& a);
+  void emitCheckSurpriseFlagsEnter(bool inTracelet, Fixup f);
   TCA  emitTransCounterInc(Asm& a);
 
   static void trimExtraArgs(ActRec* ar);
@@ -885,11 +951,9 @@ private:
   void emitBindJcc(Asm& a, ConditionCode cc, const SrcKey& dest,
                    ServiceRequest req = REQ_BIND_JCC);
   void emitBindJmp(const SrcKey& dest);
-  void emitBindCallHelper(register_name_t stashedAR,
-                          SrcKey srcKey,
+  void emitBindCallHelper(SrcKey srcKey,
                           const Func* funcd,
-                          int numArgs,
-                          bool isImmutable);
+                          int numArgs);
   void emitIncCounter(TCA start, int cntOfs);
 
   void analyzeReqLit(Tracelet& t, NormalizedInstruction& i,
@@ -915,10 +979,19 @@ private:
   // Utility function shared with IR code
   static uint64_t packBitVec(const vector<bool>& bits, unsigned i);
 
-public:
-  void resume(SrcKey sk);
+  void translateBasicIterInit(const Tracelet& t,
+                              const NormalizedInstruction& ni);
+  void translateBasicIterNext(const Tracelet& t,
+                              const NormalizedInstruction& ni);
 
-  TCA translate(const SrcKey *sk, bool align, bool useHHIR);
+public:
+  /*
+   * enterTC is the main entry point for the translator from the
+   * bytecode interpreter (see enterVMWork).  It operates on behalf of
+   * a given nested invocation of the intepreter (calling back into it
+   * as necessary for blocks that need to be interpreted).
+   */
+  void enterTC(SrcKey sk);
 
   TranslatorX64();
   virtual ~TranslatorX64();
@@ -936,7 +1009,10 @@ public:
   void defineCns(StringData* name);
 
   // Returns a string with cache usage information
-  std::string getUsage();
+  virtual std::string getUsage();
+  virtual size_t getCodeSize();
+  virtual size_t getStubSize();
+  virtual size_t getTargetCacheSize();
 
   // true iff calling thread is sole writer.
   static bool canWrite() {
@@ -965,6 +1041,7 @@ public:
   void protectCode();
   void unprotectCode();
 
+  int numTranslations(SrcKey sk) const;
 private:
   virtual bool addDbgGuards(const Unit* unit);
   virtual bool addDbgGuard(const Func* func, Offset offset);
@@ -988,11 +1065,13 @@ PSEUDOINSTRS
   // Helper functions not covered by macros above
   void irTranslateSetMProp(const Tracelet& t, const NormalizedInstruction& i);
   void irTranslateCGetMProp(const Tracelet &t, const NormalizedInstruction& i);
-  void irTranslateCGetM_LEE(const Tracelet &t, const NormalizedInstruction& i);
-  void irTranslateCGetM_GE(const Tracelet &t, const NormalizedInstruction& i);
   void irTranslateReqLit(const Tracelet& t,
                          const NormalizedInstruction& i,
                          InclOpFlags flags);
+
+private:
+  // asize + astubssize + gdatasize + trampolinesblocksize
+  size_t m_totalSize;
 };
 
 
@@ -1032,6 +1111,7 @@ const size_t kMaxNumTrampolines = kTrampolinesBlockSize /
 
 void fcallHelperThunk() asm ("__fcallHelperThunk");
 void funcBodyHelperThunk() asm ("__funcBodyHelperThunk");
+void contEnterHelperThunk() asm ("__contEnterHelperThunk");
 
 // These could be static but are used in hopt/codegen.cpp
 void raiseUndefVariable(StringData* nm);
@@ -1051,9 +1131,7 @@ int getNormalPropertyOffset(const NormalizedInstruction& i,
                             int propInput, int objInput);
 bool mInstrHasUnknownOffsets(const NormalizedInstruction& i);
 bool isSupportedCGetM_LE(const NormalizedInstruction& i);
-bool isSupportedCGetM_LEE(const NormalizedInstruction& i);
 bool isSupportedCGetM_RE(const NormalizedInstruction& i);
-bool isSupportedCGetM_GE(const NormalizedInstruction& i);
 bool isSupportedCGetM(const NormalizedInstruction& i);
 TXFlags planInstrAdd_Int(const NormalizedInstruction& i);
 TXFlags planInstrAdd_Array(const NormalizedInstruction& i);
@@ -1086,6 +1164,6 @@ struct SpaceRecorder {
 
 typedef const int COff; // Const offsets
 
-} } }
+}}}
 
 #endif

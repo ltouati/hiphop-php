@@ -183,7 +183,7 @@ bool FuncChecker::checkOffsets() {
                        section_base, section_past);
   }
   // DV entry points must be in the primary function body
-  for (Range<vector<Func::ParamInfo> > p(m_func->params()); !p.empty(); ) {
+  for (Range<FixedVector<Func::ParamInfo> > p(m_func->params()); !p.empty(); ) {
     const Func::ParamInfo& param = p.popFront();
     if (param.hasDefaultValue()) {
       ok &= checkOffset("dv-entry", param.funcletOff(), "func body", base,
@@ -239,9 +239,9 @@ bool FuncChecker::checkSection(bool is_main, const char* name, Offset base,
     if (!checkImmediates(name, i.front())) return false;
     PC pc = i.popFront();
     m_instrs.set(offset(pc) - m_func->base());
-    if (Op(*pc) == OpSwitch ||
+    if (isSwitch(*pc) ||
         instrJumpTarget(bc, offset(pc)) != InvalidAbsoluteOffset) {
-      if (Op(*pc) == OpSwitch) {
+      if (*pc == OpSwitch) {
         int64 switchBase = getImm(pc, 1).u_I64A;
         int32_t len = getImmVector(pc).size();
         int64 limit = base + len - 2;
@@ -249,6 +249,10 @@ bool FuncChecker::checkSection(bool is_main, const char* name, Offset base,
           verify_error("Overflow in Switch bounds [%d:%d]\n",
                        base, past);
         }
+      } else if (*pc == OpSSwitch) {
+        foreachSwitchString((Opcode*)pc, [&](Id& id) {
+          ok &= checkString(pc, id);
+        });
       }
       branches.push_back(pc);
     }
@@ -277,13 +281,11 @@ bool FuncChecker::checkSection(bool is_main, const char* name, Offset base,
   // within this region.
   for (Range<BranchList> i(branches); !i.empty();) {
     PC branch = i.popFront();
-    if (Op(*branch) == OpSwitch) {
-      ImmVector vec = getImmVector(branch);
-      const Offset* v = vec.vec32();
-      for (int i = 0, n = vec.size(); i < n; i++) {
-        Offset target = offset(branch + v[i]);
-        ok &= checkOffset("switch target", target, name, base, past);
-      }
+    if (isSwitch(*branch)) {
+      foreachSwitchTarget((Opcode*)branch, [&](Offset& o) {
+        ok &= checkOffset("switch target", offset(branch + o),
+                          name, base, past);
+      });
     } else {
       Offset target = instrJumpTarget(bc, offset(branch));
       ok &= checkOffset("branch target", target, name, base, past);
@@ -453,7 +455,8 @@ bool FuncChecker::checkImmediates(const char* name, const Opcode* instr) {
       }
       break;
     }
-    case BLA: { // vec of int32 for Switch
+    case BLA:
+    case SLA: { // vec of offsets for Switch/SSwitch
       int len = *(int*)pc;
       if (len < 1) {
         verify_error("invalid length of jump table %d at Offset %d\n",
@@ -568,6 +571,7 @@ const FlavorDesc* FuncChecker::sig(PC pc) {
   #define ONE(a) { a },
   #define TWO(a,b) { b, a },
   #define THREE(a,b,c) { c, b, a },
+  #define FOUR(a,b,c,d) { d, c, b, a },
   #define LMANY() { },
   #define C_LMANY() { },
   #define V_LMANY() { },
@@ -579,6 +583,7 @@ const FlavorDesc* FuncChecker::sig(PC pc) {
   #undef LMANY
   #undef FMANY
   #undef CMANY
+  #undef FOUR
   #undef THREE
   #undef TWO
   #undef ONE
@@ -600,6 +605,7 @@ const FlavorDesc* FuncChecker::sig(PC pc) {
     return vectorSig(pc, CV);
   case OpFCall:     // ONE(IVA),     FMANY,   ONE(RV)
   case OpFCallArray:// NA,           ONE(FV), ONE(RV)
+  case OpFCallBuiltin: //TWO(IVA, SA) FMANY,   ONE(RV)
     for (int i = 0, n = instrNumPops(pc); i < n; ++i) {
       m_tmp_sig[i] = FV;
     }
@@ -716,6 +722,7 @@ bool FuncChecker::checkOutputs(State* cur, PC pc, Block* b) {
   #define ONE(a) { a },
   #define TWO(a,b) { a, b },
   #define THREE(a,b,c) { a, b, c },
+  #define FOUR(a,b,c,d) { a, b, c, d },
   #define INS_1(a) { a },
   #define INS_2(a) { a },
   #define LMANY() { },
@@ -731,6 +738,7 @@ bool FuncChecker::checkOutputs(State* cur, PC pc, Block* b) {
   #undef CMANY
   #undef INS_1
   #undef INS_2
+  #undef FOUR
   #undef THREE
   #undef TWO
   #undef ONE

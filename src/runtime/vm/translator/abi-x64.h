@@ -26,7 +26,7 @@
 #ifndef incl_VM_RUNTIME_TRANSLATOR_ABI_X64_H_
 #define incl_VM_RUNTIME_TRANSLATOR_ABI_X64_H_
 
-#include "runtime/vm/translator/asm-x64.h"
+#include "util/asm-x64.h"
 #include "runtime/vm/translator/regalloc.h"
 
 namespace HPHP { namespace VM { namespace Transl {
@@ -43,19 +43,19 @@ namespace HPHP { namespace VM { namespace Transl {
  * Frame pointer.  When mid-trace, points to the ActRec for the
  * function currently executing.
  */
-const PhysReg rVmFp      = reg::rbp;
+constexpr PhysReg rVmFp      = reg::rbp;
 
 /*
  * Stack pointer.  When mid-trace, points to the top of the eval stack
  * (lowest valid address) at the start of the current tracelet.
  */
-const PhysReg rVmSp      = reg::rbx;
+constexpr PhysReg rVmSp      = reg::rbx;
 
 /*
  * Target cache pointer.  Always points to the base of the target
  * cache block for the current request.
  */
-const PhysReg rVmTl      = reg::r12;
+constexpr PhysReg rVmTl      = reg::r12;
 
 //////////////////////////////////////////////////////////////////////
 /*
@@ -101,7 +101,7 @@ const RegSet kAllRegs     = kCallerSaved | kCalleeSaved;
  * pointer (the new ActRec) is placed into this register.  rVmFp still
  * points to the caller's ActRec when the prologue is entered.
  */
-const PhysReg rStashedAR = reg::r15;
+constexpr PhysReg rStashedAR = reg::r15;
 
 /*
  * A set of all special cross-tracelet registers.
@@ -144,6 +144,8 @@ const PhysReg serviceReqArgRegs[] = {
   // rdi: contains request number
   reg::rsi, reg::rdx, reg::rcx, reg::r8, reg::r9
 };
+const int kNumServiceReqArgRegs =
+  sizeof(serviceReqArgRegs) / sizeof(PhysReg);
 
 #define SERVICE_REQUESTS \
   /*
@@ -210,6 +212,7 @@ const PhysReg serviceReqArgRegs[] = {
    * to use HHIR.
    */ \
   REQ(RETRANSLATE_NO_IR) \
+  \
   /*
    * Resume restarts execution at the current PC.  This is used after
    * an interpOne of an instruction that changes the PC, and in some
@@ -228,6 +231,7 @@ enum ServiceRequest {
 // Set of all the x64 registers.
 const RegSet kAllX64Regs = RegSet(kAllRegs).add(reg::r10)
                          | kSpecialCrossTraceRegs;
+const int kNumX64Regs = 16;
 
 /*
  * Some data structures are accessed often enough from translated code

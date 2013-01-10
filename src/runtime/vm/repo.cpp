@@ -39,7 +39,6 @@ void initialize_repo() {
   if (sqlite3_config(SQLITE_CONFIG_MULTITHREAD) != SQLITE_OK) {
     TRACE(1, "Failed to set default SQLite multi-threading mode\n");
   }
-
   if (const char* schemaOverride = getenv("HHVM_RUNTIME_REPO_SCHEMA")) {
     TRACE(1, "Schema override: HHVM_RUNTIME_REPO_SCHEMA=%s\n", schemaOverride);
     Repo::kSchemaId = schemaOverride;
@@ -220,8 +219,8 @@ void Repo::begin() {
   }
   if (debug) {
     // Verify start state.
-    assert(m_txDepth == 0);
-    assert(!m_rollback);
+    always_assert(m_txDepth == 0);
+    always_assert(!m_rollback);
     if (true) {
       // Bypass RepoQuery, in order to avoid triggering exceptions.
       int rc = sqlite3_step(m_rollbackStmt.get());
@@ -240,7 +239,7 @@ void Repo::begin() {
       } catch (RepoExc& re) {
         rollbackFailed = true;
       }
-      assert(rollbackFailed);
+      always_assert(rollbackFailed);
     }
   }
   RepoQuery query(m_beginStmt);
@@ -511,8 +510,7 @@ void Repo::pragmas(int repoId) {
   static const int synchronous = 0;
   setIntPragma(repoId, "synchronous", synchronous);
   // Valid journal_mode values: delete, truncate, persist, memory, wal, off.
-  static const char* journal_mode = "delete";
-  setTextPragma(repoId, "journal_mode", journal_mode);
+  setTextPragma(repoId, "journal_mode", RuntimeOption::RepoJournal.c_str());
 }
 
 void Repo::getIntPragma(int repoId, const char* name, int& val) {

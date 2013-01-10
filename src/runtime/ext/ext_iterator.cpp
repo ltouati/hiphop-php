@@ -68,12 +68,6 @@ get_directoryiterator(CObjRef obj) {
   return rsrc.getTyped<DirectoryIterator>();
 }
 
-static void decRefObj(ObjectData* obj) {
-  if (obj->decRefCount() == 0) {
-    obj->release();
-  }
-}
-
 DirectoryIterator::DirectoryIterator(CStrRef path) :
   m_path(path), m_index(0) {
   Variant dir = f_opendir(m_path);
@@ -477,7 +471,7 @@ void c_MutableArrayIterator::t___construct(VRefParam array) {
     if (!m_valid) mi.~MIterCtx();
   } else if (rtv->m_type == KindOfObject) {
     CStrRef ctxStr = hhvm
-                     ? g_vmContext->getContextClassName(true)
+                     ? g_vmContext->getContextClassName()
                      : FrameInjection::GetClassName(true);
     if (rtv->m_data.pobj->isCollection()) {
       raise_error("Collection elements cannot be taken by reference");

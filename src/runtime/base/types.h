@@ -125,17 +125,17 @@ class VariableUnserializer;
  */
 
 enum DataType {
-  // Self and Parent are defined here for use by class TypeConstraint.
-  // KindOfSelf/Parent are not used by TypedValue
-  KindOfSelf      = -4,
-  KindOfParent    = -3,
+  MinDataType            = -13,
 
-  MinDataType     = -2,
+  KindOfClass            = -13,
 
   // Values below zero are not PHP values, but runtime-internal.
-  KindOfClass     = -2,
-  KindOfInvalid   = -1,
-  KindOfUnknown   = KindOfInvalid,
+  KindOfAny              = -8,
+  KindOfUncounted        = -7,
+  KindOfUncountedInit    = -6,
+
+  KindOfInvalid          = -1,
+  KindOfUnknown          = KindOfInvalid,
 
   /**
    * Beware if you change the order, as we may have a few type checks
@@ -143,39 +143,131 @@ enum DataType {
    * the number of bits needed to represent this.  (Known dependency
    * in unwind-x64.h.)
    */
-  KindOfUninit  = 0,
-  KindOfNull    = 1,
-  KindOfBoolean = 2,
-  KindOfInt64   = 3,
-  KindOfDouble  = 4,
-  KindOfStaticString  = 6,
-  KindOfString  = 7,
-  KindOfArray   = 8,
-  KindOfObject  = 9,
-  KindOfRef     = 10,
-  KindOfIndirect = 11,
+  KindOfUninit           = 0,
 
-  MaxNumDataTypes = 12, // marker, not a valid type
+  // Note: KindOfStringBit must be set in KindOfStaticString and KindOfString,
+  //       and it must be 0 in any other real DataType.
+  KindOfStringBit        = 4,
 
-  MaxDataType   = 0x7fffffff // Allow KindOf* > 11 in HphpArray.
+  // Note: KindOfUncountedInitBit must be set for Null, Boolean, Int64, Double,
+  //       and StaticString, and it must be 0 for any other real DataType.
+  KindOfUncountedInitBit = 8,
+
+  KindOfNull             = 8,     //   0001000
+  KindOfBoolean          = 9,     //   0001001
+  KindOfInt64            = 10,    //   0001010
+  KindOfDouble           = 11,    //   0001011
+
+  KindOfStaticString     = 12,    //   0001100
+  KindOfString           = 20,    //   0010100
+  KindOfArray            = 32,    //   0100000
+  KindOfObject           = 64,    //   1000000
+  KindOfRef              = 96,    //   1100000
+  KindOfIndirect         = 97,    //   1100001
+
+  MaxNumDataTypes        = KindOfIndirect + 1, // marker, not a valid type
+  MaxNumDataTypesIndex   = 11 + 1,  // 1 + the number of valid DataTypes above
+
+  MaxDataType            = 0x7fffffff // Allow KindOf* > 11 in HphpArray.
 };
 BOOST_STATIC_ASSERT((sizeof(DataType) == 4));
+
+
+BOOST_STATIC_ASSERT(KindOfString       & KindOfStringBit);
+BOOST_STATIC_ASSERT(KindOfStaticString & KindOfStringBit);
+BOOST_STATIC_ASSERT(!(KindOfUninit     & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfNull       & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfBoolean    & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfInt64      & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfDouble     & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfArray      & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfObject     & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfRef        & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfIndirect   & KindOfStringBit));
+BOOST_STATIC_ASSERT(!(KindOfClass      & KindOfStringBit));
+
+BOOST_STATIC_ASSERT(KindOfNull         & KindOfUncountedInitBit);
+BOOST_STATIC_ASSERT(KindOfBoolean      & KindOfUncountedInitBit);
+BOOST_STATIC_ASSERT(KindOfInt64        & KindOfUncountedInitBit);
+BOOST_STATIC_ASSERT(KindOfDouble       & KindOfUncountedInitBit);
+BOOST_STATIC_ASSERT(KindOfStaticString & KindOfUncountedInitBit);
+BOOST_STATIC_ASSERT(!(KindOfUninit     & KindOfUncountedInitBit));
+BOOST_STATIC_ASSERT(!(KindOfString     & KindOfUncountedInitBit));
+BOOST_STATIC_ASSERT(!(KindOfArray      & KindOfUncountedInitBit));
+BOOST_STATIC_ASSERT(!(KindOfObject     & KindOfUncountedInitBit));
+BOOST_STATIC_ASSERT(!(KindOfRef        & KindOfUncountedInitBit));
+BOOST_STATIC_ASSERT(!(KindOfIndirect   & KindOfUncountedInitBit));
+BOOST_STATIC_ASSERT(!(KindOfClass      & KindOfUncountedInitBit));
+
+const unsigned int kDataTypeMask = 0x7F;
+
+BOOST_STATIC_ASSERT(MaxNumDataTypes - 1 <= kDataTypeMask);
 
 // All DataTypes greater than this value are refcounted.
 const DataType KindOfRefCountThreshold = KindOfStaticString;
 
+enum DataTypeCategory {
+  DataTypeGeneric,
+  DataTypeCountness,
+  DataTypeCountnessInit,
+  DataTypeSpecific
+};
+
 std::string tname(DataType t);
 
-inline int getDataTypeIndex(DataType t) {
-  return t;
+inline int getDataTypeIndex(DataType type) {
+  switch (type) {
+    case KindOfUninit       : return 0;
+    case KindOfNull         : return 1;
+    case KindOfBoolean      : return 2;
+    case KindOfInt64        : return 3;
+    case KindOfDouble       : return 4;
+    case KindOfStaticString : return 5;
+    case KindOfString       : return 6;
+    case KindOfArray        : return 7;
+    case KindOfObject       : return 8;
+    case KindOfRef          : return 9;
+    case KindOfIndirect     : return 10;
+    default                 : not_reached();
+  }
+}
+
+inline DataType getDataTypeValue(unsigned index) {
+  switch (index) {
+    case 0  : return KindOfUninit;
+    case 1  : return KindOfNull;
+    case 2  : return KindOfBoolean;
+    case 3  : return KindOfInt64;
+    case 4  : return KindOfDouble;
+    case 5  : return KindOfStaticString;
+    case 6  : return KindOfString;
+    case 7  : return KindOfArray;
+    case 8  : return KindOfObject;
+    case 9  : return KindOfRef;
+    case 10 : return KindOfIndirect;
+    default : not_reached();
+  }
+}
+
+// These are used in type_variant.cpp and translator-x64.cpp
+const unsigned int kShiftDataTypeToDestrIndex = 5;
+const unsigned int kDestrTableSize = 4;
+
+#define TYPE_TO_DESTR_IDX(t) ((t) >> kShiftDataTypeToDestrIndex)
+
+static inline ALWAYS_INLINE unsigned typeToDestrIndex(DataType t) {
+  ASSERT(t >= KindOfString && t <= KindOfRef);
+  return TYPE_TO_DESTR_IDX(t);
 }
 
 // Helper macro for checking if a given type is refcounted
 #define IS_REFCOUNTED_TYPE(t) ((t) > KindOfRefCountThreshold)
 // Helper macro for checking if a type is KindOfString or KindOfStaticString.
-#define IS_STRING_TYPE(t) (((t) & ~1) == 6)
+BOOST_STATIC_ASSERT(KindOfStaticString == 0x0C);
+BOOST_STATIC_ASSERT(KindOfString       == 0x14);
+#define IS_STRING_TYPE(t) (((t) & ~0x18) == KindOfStringBit)
 // Check if a type is KindOfUninit or KindOfNull
-#define IS_NULL_TYPE(t) (unsigned(t) <= 1)
+#define IS_NULL_TYPE(t) (unsigned(t) <= KindOfNull)
 // Other type check macros
 #define IS_INT_TYPE(t) ((t) == KindOfInt64)
 #define IS_ARRAY_TYPE(t) ((t) == KindOfArray)
@@ -183,7 +275,7 @@ inline int getDataTypeIndex(DataType t) {
 #define IS_DOUBLE_TYPE(t) ((t) == KindOfDouble)
 
 #define IS_REAL_TYPE(t) \
-  ((t) >= KindOfUninit && (t) < MaxNumDataTypes || (t) == KindOfClass)
+  (((t) >= KindOfUninit && (t) < MaxNumDataTypes) || (t) == KindOfClass)
 
 namespace Collection {
 enum Type {
@@ -252,10 +344,11 @@ namespace VM {
 
 class RequestInjectionData {
 public:
-  static const ssize_t MemExceededFlag = 1;
-  static const ssize_t TimedOutFlag = 2;
-  static const ssize_t SignaledFlag = 4;
-  static const ssize_t EventHookFlag = 8;
+  static const ssize_t MemExceededFlag = 1 << 0;
+  static const ssize_t TimedOutFlag    = 1 << 1;
+  static const ssize_t SignaledFlag    = 1 << 2;
+  static const ssize_t EventHookFlag   = 1 << 3;
+  static const ssize_t LastFlag        = EventHookFlag;
 
   RequestInjectionData()
     : conditionFlags(0), surprisePage(NULL), started(0), timeoutSeconds(-1),
@@ -312,6 +405,9 @@ class Profiler;
 class GlobalVariables;
 class CodeCoverage;
 
+int object_alloc_size_to_index(size_t);
+size_t object_alloc_index_to_size(int);
+
 // implemented in runtime/base/thread_info
 DECLARE_BOOST_TYPES(Array);
 class ThreadInfo {
@@ -367,9 +463,13 @@ public:
   void clearPendingException();
   ObjectAllocatorBase* instanceSizeAllocator(size_t size) {
     const_assert(hhvm);
-    extern int object_alloc_size_to_index(size_t);
     int index = object_alloc_size_to_index(size);
     ASSERT_NOT_IMPLEMENTED(index != -1);
+    return m_allocators[index];
+  }
+
+  ObjectAllocatorBase* instanceIdxAllocator(int index) {
+    const_assert(hhvm);
     return m_allocators[index];
   }
 

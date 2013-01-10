@@ -17,25 +17,27 @@
 
 include(HPHPSetup)
 
-# find all the source files
 if ("$ENV{USE_HHVM}" STREQUAL "1")
+	# HHVM Build
 	SET(USE_HHVM TRUE)
 	SET(ENV{HHVM} 1)
+	ADD_DEFINITIONS("-DHHVM -DHHVM_BINARY=1 -DHHVM_PATH=\\\"${HPHP_HOME}/src/hhvm/hhvm\\\"")
+	set(RECURSIVE_SOURCE_SUBDIRS runtime/base runtime/eval runtime/ext runtime/ext_hhvm runtime/vm system/gen system/lib util)
+
+	if ("$ENV{USE_HPHPC}" STREQUAL "1")
+		message(FATAL_ERROR "Both USE_HHVM and USE_HPHPC are set, you may only select one")
+	endif()
 else()
+	# HPHPc Build
 	SET(USE_HHVM FALSE)
+	ADD_DEFINITIONS("-DHHVM_PATH=\"\"")
+	set(RECURSIVE_SOURCE_SUBDIRS runtime/base runtime/eval runtime/ext runtime/vm system/gen system/lib util)
+
+	if (NOT "$ENV{USE_HPHPC}" STREQUAL "1")
+		message(FATAL_ERROR "You must select which version of HipHop to build by setting either USE_HHVM=1 or USE_HPHPC=1 in your environment")
+	endif()
 endif()
 
-if (USE_HHVM)
-	ADD_DEFINITIONS("-DHHVM -DHHVM_BINARY=1 -DHHVM_PATH=\\\"${HPHP_HOME}/src/hhvm/hhvm\\\"")
-else()
-	ADD_DEFINITIONS("-DHHVM_PATH=\"\"")
-endif(USE_HHVM)
-
-if (USE_HHVM)
-	set(RECURSIVE_SOURCE_SUBDIRS runtime/base runtime/eval runtime/ext runtime/ext_hhvm runtime/vm system/gen system/lib util)
-else()
-	set(RECURSIVE_SOURCE_SUBDIRS runtime/base runtime/eval runtime/ext runtime/vm system/gen system/lib util)
-endif(USE_HHVM)
 
 foreach (dir ${RECURSIVE_SOURCE_SUBDIRS})
 
@@ -50,22 +52,23 @@ endforeach(dir ${RECURSIVE_SOURCE_SUBDIRS})
 # Disable hardware counters off of Linux
 if(NOT LINUX)
 	add_definitions(-DNO_HARDWARE_COUNTERS)
-	list(REMOVE_ITEM CXX_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/util/hardware_counter.cpp)
+	list(REMOVE_ITEM CXX_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/runtime/base/hardware_counter.cpp)
 endif()
 
-# remove ext_hhvm
+# remove ext_hhvm and util/tests
 foreach (file ${CXX_SOURCES})
        	if (${file} MATCHES "ext_hhvm")
-               	message("Removing hhvm file ${file}")
-                       list(REMOVE_ITEM CXX_SOURCES ${file})
-                endif()
+		list(REMOVE_ITEM CXX_SOURCES ${file})
+	endif()
+	if (${file} MATCHES "util/tests")
+		list(REMOVE_ITEM CXX_SOURCES ${file})
+	endif()
 endforeach(file ${CXX_SOURCES})
 
 # remove ext/sep for hhvm
 if (USE_HHVM)
 	foreach (file ${CXX_SOURCES})
 		if (${file} MATCHES "ext/sep")
-			message("Removing ${file}")
 			list(REMOVE_ITEM CXX_SOURCES ${file})
 		endif()
 	endforeach(file ${CXX_SOURCES})
@@ -110,8 +113,6 @@ foreach (t ${HPHP_EXCLUDE_FILES})
 		endif()
 	endif ()
 endforeach(t ${HPHP_EXCLUDE_FILES})
-
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/runtime/base/memory/smart_allocator.core.inc ${CMAKE_CURRENT_SOURCE_DIR}/runtime/base/memory/smart_allocator.inc_gen COPYONLY)
 
 #FLEX_TARGET(HphpScanner ${CMAKE_CURRENT_SOURCE_DIR}/runtime/eval/parser/hphp.x ${CMAKE_CURRENT_SOURCE_DIR}/runtime/eval/parser/lex.eval_.cpp COMPILE_FLAGS " -w -i -Peval_")
 #BISON_TARGET(HphpParser ${CMAKE_CURRENT_SOURCE_DIR}/runtime/eval/parser/hphp.y ${CMAKE_CURRENT_SOURCE_DIR}/runtime/eval/parser/hphp.tab.cpp  COMPILE_FLAGS " -v -d -p eval_")
@@ -177,11 +178,11 @@ SET(CMAKE_CXX_ARCHIVE_APPEND "<CMAKE_AR> q <TARGET> <LINK_FLAGS> <OBJECTS>")
 hphp_link(hphp_runtime_static)
 
 add_subdirectory(compiler)
+add_subdirectory(hphp)
 
 if (USE_HHVM)
-        add_subdirectory(runtime/ext_hhvm)
-endif(USE_HHVM)
-
-add_subdirectory(hphp)
+	add_subdirectory(runtime/ext_hhvm)
+	add_subdirectory(hhvm)
+endif()
 
 add_subdirectory(test)

@@ -152,16 +152,17 @@ int generateSepExtCpp(const ProgramOptions &po, AnalysisResultPtr ar);
 
 ///////////////////////////////////////////////////////////////////////////////
 
+extern "C" void compiler_hook_initialize();
+
 int main(int argc, char **argv) {
   try {
     Hdf empty;
     RuntimeOption::Load(empty);
 
     ProgramOptions po;
-    void (*compiler_hook_initialize)();
-    compiler_hook_initialize =
-      (void (*)())dlsym(NULL, "compiler_hook_initialize");
-    if (compiler_hook_initialize) compiler_hook_initialize();
+#ifdef FACEBOOK
+    compiler_hook_initialize();
+#endif
 
     int ret = prepareOptions(po, argc, argv);
     if (ret == 1) return 0; // --help
@@ -873,6 +874,7 @@ int hhbcTarget(const ProgramOptions &po, AnalysisResultPtr ar,
   RuntimeOption::RepoLocalPath = ar->getOutputPath() + '/' + po.program;
   RuntimeOption::RepoLocalMode = "rw";
   RuntimeOption::RepoDebugInfo = Option::RepoDebugInfo;
+  RuntimeOption::RepoJournal = "memory";
 
   int formatCount = 0;
   const char *type = 0;
@@ -1046,7 +1048,7 @@ int runTarget(const ProgramOptions &po) {
 
   // If there are more than one input files, we need one extra arg to run.
   // If it's missing, we will stop right here, with compiled code.
-  if (po.inputs.size() != 1 && po.programArgs.empty() ||
+  if ((po.inputs.size() != 1 && po.programArgs.empty()) ||
       !po.inputList.empty()) {
     return 0;
   }

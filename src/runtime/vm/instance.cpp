@@ -16,7 +16,6 @@
 
 #include "runtime/base/base_includes.h"
 #include "runtime/base/variable_serializer.h"
-#include "runtime/base/tv_macros.h"
 #include "runtime/vm/core_types.h"
 #include "runtime/vm/member_operations.h"
 #include "runtime/vm/hhbc.h"
@@ -52,14 +51,7 @@ const TypedValue* Instance::propVec() const {
   return const_cast<Instance*>(this)->propVec();
 }
 
-void Instance::initialize(Slot nProps) {
-  const Class::PropInitVec* propInitVec = m_cls->getPropData();
-  ASSERT(propInitVec != NULL);
-  ASSERT(nProps == propInitVec->size());
-  memcpy(propVec(), &(*propInitVec)[0], nProps * sizeof(TypedValue));
-}
-
-void Instance::callCustomInstanceInit() {
+Instance* Instance::callCustomInstanceInit() {
   static StringData* sd_init = StringData::GetStaticString("__init__");
   const Func* init = m_cls->lookupMethod(sd_init);
   if (init != NULL) {
@@ -72,13 +64,21 @@ void Instance::callCustomInstanceInit() {
     decRefCount();
     ASSERT(!IS_REFCOUNTED_TYPE(tv.m_type));
   }
+  return this;
+}
+
+HOT_FUNC_VM
+Instance* Instance::newInstanceRaw(Class* cls, int idx) {
+  Instance* obj = (Instance*)ALLOCOBJIDX(idx);
+  new (obj) Instance(cls, noinit);
+  return obj;
 }
 
 void Instance::destructHard(const Func* meth) {
   static ArrayData* args =
     ArrayData::GetScalarArray(HphpArray::GetStaticEmptyArray());
   TypedValue retval;
-  TV_WRITE_NULL(&retval);
+  tvWriteNull(&retval);
   try {
     // Call the destructor method
     g_vmContext->invokeFunc(&retval, meth, CArrRef(args), this);
@@ -113,7 +113,9 @@ Object Instance::FromArray(ArrayData *properties) {
       props->nvSet(key.m_data.num, value, false);
     } else {
       ASSERT(IS_STRING_TYPE(key.m_type));
-      props->nvSet(key.m_data.pstr, value, false);
+      StringData* strKey = key.m_data.pstr;
+      props->nvSet(strKey, value, false);
+      decRefStr(strKey);
     }
   }
   return retval;
@@ -638,16 +640,18 @@ Array Instance::o_toIterArray(CStrRef context, bool getRef /* = false */) {
         continue;
       }
 
+      StringData* strKey = key.m_data.pstr;
       TypedValue* val =
-        static_cast<HphpArray*>(o_properties.get())->nvGet(key.m_data.pstr);
+        static_cast<HphpArray*>(o_properties.get())->nvGet(strKey);
       if (getRef) {
         if (val->m_type != KindOfRef) {
           tvBox(val);
         }
-        retval->nvBind(key.m_data.pstr, val);
+        retval->nvBind(strKey, val);
       } else {
-        retval->nvSet(key.m_data.pstr, val, false);
+        retval->nvSet(strKey, val, false);
       }
+      decRefStr(strKey);
     }
   }
 
@@ -933,9 +937,7 @@ void Instance::cloneSet(ObjectData* clone) {
                                sizeof(ObjectData) + builtinPropSize());
   for (Slot i = 0; i < nProps; i++) {
     tvRefcountedDecRef(&iclonePropVec[i]);
-    TypedValue* fr = &propVec()[i];
-    TypedValue* to = &iclonePropVec[i];
-    TV_DUP_FLATTEN_VARS(fr, to, NULL);
+    tvDupFlattenVars(&propVec()[i], &iclonePropVec[i], NULL);
   }
   iclone->initDynProps();
   if (o_properties.get() != NULL) {
@@ -944,23 +946,15 @@ void Instance::cloneSet(ObjectData* clone) {
       auto props = static_cast<HphpArray*>(o_properties.get());
       TypedValue key;
       props->nvGetKey(&key, iter);
-      TypedValue *val = props->nvGet(key.m_data.pstr);
-      // duplicate logic of TV_DUP_FLATTEN_VARS so that we
-      // can avoid setting _count, which holds data owned by the
-      // HphpArray.
+      ASSERT(tvIsString(&key));
+      StringData* strKey = key.m_data.pstr;
+      TypedValue *val = props->nvGet(strKey);
+      TypedValue *retval;
       auto cloneProps = iclone->o_properties.get();
-      if (LIKELY(val->m_type != KindOfRef)) {
-        cloneProps->set(*(const String *)&key.m_data.pstr,
-                        tvAsCVarRef(val), false);
-      } else if (val->m_data.pref->_count <= 1) {
-        val = val->m_data.pref->tv();
-        cloneProps->set(*(const String *)&key.m_data.pstr,
-                        tvAsCVarRef(val), false);
-      } else {
-        cloneProps->setRef(*(const String *)&key.m_data.pstr,
-                           tvAsCVarRef(val), false);
-      }
+      cloneProps->lvalPtr(strKey, *(Variant**)&retval, false, true);
+      tvDupFlattenVars(val, retval, cloneProps);
       iter = o_properties.get()->iter_advance(iter);
+      decRefStr(strKey);
     }
   }
 }

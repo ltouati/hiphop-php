@@ -22,7 +22,7 @@
 #ifndef __HPHP_STRING_H__
 #define __HPHP_STRING_H__
 
-#include <util/assert.h>
+#include <util/assertions.h>
 #include <runtime/base/util/smart_ptr.h>
 #include <runtime/base/string_data.h>
 #include <runtime/base/string_offset.h>
@@ -48,8 +48,6 @@ typedef GCRootTracker<StringData> StringBase;
 typedef SmartPtr<StringData> StringBase;
 #endif
 
-extern StringData* empty_string_data;
-
 /**
  * String type wrapping around StringData to implement copy-on-write and
  * literal string handling (to avoid string copying).
@@ -59,9 +57,9 @@ public:
   typedef hphp_hash_map<int64, const StringData *, int64_hash>
     IntegerStringDataMap;
   static const int MinPrecomputedInteger = SCHAR_MIN;
-  static const int MaxPrecomputedInteger = 65535;
-  static StringData *converted_integers_raw;
-  static StringData *converted_integers;
+  static const int MaxPrecomputedInteger = 4095 + SCHAR_MIN;
+  static StringData const **converted_integers_raw;
+  static StringData const **converted_integers;
   static IntegerStringDataMap integer_string_data_map;
 
   static bool HasConverted(int64 n) {
@@ -77,9 +75,13 @@ public:
     return StringData::GetStaticString(ch);
   }
 
+  static const StringData *ConvertInteger(int64 n) ATTRIBUTE_COLD;
   static const StringData *GetIntegerStringData(int64 n) {
     if (HasConverted(n)) {
-      const StringData *sd = converted_integers + n;
+      const StringData *sd = *(converted_integers + n);
+      if (UNLIKELY(sd == NULL)) {
+        return ConvertInteger(n);
+      }
       return sd;
     }
     IntegerStringDataMap::const_iterator it =
@@ -195,9 +197,6 @@ public:
   const char *data() const {
     return m_px ? m_px->data() : "";
   }
-  StringData* stringData() const {
-    return m_px ? m_px : empty_string_data;
-  }
 private:
   // This method is only used internally for comparisons; that is, fully
   // self-contained string ops which do not lead to mutation or creation and
@@ -216,6 +215,9 @@ public:
     ASSERT(m_px);
     m_px->shrink(len);
     return *this;
+  }
+  MutableSlice reserve(int size) {
+    return m_px ? m_px->reserve(size) : MutableSlice("", 0);
   }
   const char *c_str() const {
     return m_px ? m_px->data() : "";
@@ -458,11 +460,6 @@ public:
    * Check TheStaticStringSet, and upgrade itself to an existing StaticString.
    */
   bool checkStatic();
-
-  StringData* asStaticString() const {
-    if (m_px) return StringData::GetStaticString(m_px);
-    else return StringData::GetStaticString("");
-  }
 
   /**
    * Debugging

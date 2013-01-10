@@ -76,13 +76,6 @@ const char *BuiltinSymbols::ExtensionClasses[] = {
 };
 #undef EXT_TYPE
 
-const char *BuiltinSymbols::ExtensionDeclaredDynamic[] = {
-#define EXT_TYPE 3
-#include <system/ext.inc>
-  NULL,
-};
-#undef EXT_TYPE
-
 const char *BuiltinSymbols::HelperFunctions[] = {
 #include <system/helper.inc>
   NULL,
@@ -112,7 +105,6 @@ StringToClassScopePtrMap BuiltinSymbols::s_classes;
 VariableTablePtr BuiltinSymbols::s_variables;
 ConstantTablePtr BuiltinSymbols::s_constants;
 StringToTypePtrMap BuiltinSymbols::s_superGlobals;
-std::set<std::string> BuiltinSymbols::s_declaredDynamic;
 void *BuiltinSymbols::s_handle_main = NULL;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -239,14 +231,6 @@ void BuiltinSymbols::ParseExtClasses(AnalysisResultPtr ar, const char **p,
   }
 }
 
-void BuiltinSymbols::ParseExtDynamics(AnalysisResultPtr ar, const char **p,
-                                      bool sep) {
-  while (*p) {
-    s_declaredDynamic.insert(Util::toLower(string(*p)));
-    p++;
-  }
-}
-
 FunctionScopePtr BuiltinSymbols::ParseExtFunction(AnalysisResultPtr ar,
     const char** &p, bool method /* = false */) {
   const char *name = *p++;
@@ -260,6 +244,7 @@ FunctionScopePtr BuiltinSymbols::ParseExtFunction(AnalysisResultPtr ar,
     /* name */ arg++;
     ParseType(arg);
     const char *argDefault = *arg++;
+    /* const char *argDefaultLen = */ arg++;
     /* const char *argDefaultText = */ arg++;
     /* bool argReference = */ arg++;
     if (argDefault && minParam < 0) {
@@ -280,13 +265,16 @@ FunctionScopePtr BuiltinSymbols::ParseExtFunction(AnalysisResultPtr ar,
   while ((paramName = *p++ /* argName */)) {
     TypePtr argType = ParseType(p);
     const char *argDefault = *p++;
+    const char *argDefaultLen = *p++;
     const char *argDefaultText = *p++;
     bool argReference = *p++;
 
     f->setParamName(index, paramName);
     if (argReference) f->setRefParam(index);
     f->setParamType(ar, index, argType);
-    if (argDefault) f->setParamDefault(index, argDefault, argDefaultText);
+    if (argDefault) f->setParamDefault(index, argDefault,
+                                       (int64_t)argDefaultLen,
+                                       argDefaultText);
 
     index++;
   }
@@ -316,6 +304,12 @@ FunctionScopePtr BuiltinSymbols::ParseExtFunction(AnalysisResultPtr ar,
   }
   if (flags & ClassInfo::ContextSensitive) {
     f->setContextSensitive(true);
+  }
+  if (flags & ClassInfo::NeedsActRec) {
+    f->setNeedsActRec();
+  }
+  if ((flags & ClassInfo::IgnoreRedefinition) && !method) {
+    f->setIgnoreRedefinition();
   }
   return f;
 }
@@ -369,7 +363,6 @@ bool BuiltinSymbols::LoadSepExtensionSymbols(AnalysisResultPtr ar,
   ParseExtFunctions(ar, symbols[0], true);
   ParseExtConsts   (ar, symbols[1], true);
   ParseExtClasses  (ar, symbols[2], true);
-  ParseExtDynamics (ar, symbols[3], true);
 
   if (handle) {
     /*
@@ -447,8 +440,8 @@ bool BuiltinSymbols::Load(AnalysisResultPtr ar, bool extOnly /* = false */) {
     if (!fileScopes.empty()) {
       s_constants = fileScopes[0]->getConstants();
     } else {
-      ar2 = AnalysisResultPtr(new AnalysisResult());
-      s_constants = ConstantTablePtr(new ConstantTable(*ar2.get()));
+      Logger::Error("Couldn't load constants.php");
+      return false;
     }
     NoSuperGlobals = false;
   } else {
@@ -462,7 +455,6 @@ bool BuiltinSymbols::Load(AnalysisResultPtr ar, bool extOnly /* = false */) {
   // load extension constants, classes and dynamics
   ParseExtConsts(ar, ExtensionConsts, false);
   ParseExtClasses(ar, ExtensionClasses, false);
-  ParseExtDynamics(ar, ExtensionDeclaredDynamic, false);
   for (unsigned int i = 0; i < Option::SepExtensions.size(); i++) {
     Option::SepExtensionOptions &options = Option::SepExtensions[i];
     string soname = options.soname;
@@ -549,6 +541,15 @@ void BuiltinSymbols::LoadConstants(AnalysisResultPtr ar,
   }
 }
 
+ConstantTablePtr BuiltinSymbols::LoadSystemConstants() {
+  AnalysisResultPtr ar = LoadGlobalSymbols("constants.php");
+  const auto &fileScopes = ar->getAllFilesVector();
+  if (!fileScopes.empty()) {
+    return fileScopes[0]->getConstants();
+  }
+  throw std::runtime_error("LoadSystemConstants failed");
+}
+
 void BuiltinSymbols::LoadSuperGlobals() {
   if (s_superGlobals.empty()) {
     s_superGlobals["_SERVER"] = Type::Variant;
@@ -574,8 +575,4 @@ TypePtr BuiltinSymbols::GetSuperGlobalType(const std::string &name) {
     return iter->second;
   }
   return TypePtr();
-}
-
-bool BuiltinSymbols::IsDeclaredDynamic(const std::string& name) {
-  return s_declaredDynamic.find(name) != s_declaredDynamic.end();
 }

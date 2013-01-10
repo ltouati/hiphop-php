@@ -222,7 +222,7 @@ struct NameValueTable : private boost::noncopyable {
     Elm* elm = insert(name);
     if (!elm->m_tv) {
       addStorage(elm);
-      TV_WRITE_NULL(elm->m_tv);
+      tvWriteNull(elm->m_tv);
     }
     return elm->m_tv;
   }
@@ -247,12 +247,12 @@ struct NameValueTable : private boost::noncopyable {
     Elm* elm = insert(name);
     if (!elm->m_tv) {
       addStorage(elm);
-      TV_WRITE_NULL(elm->m_tv);
+      tvWriteNull(elm->m_tv);
       return elm->m_tv;
     }
     TypedValue* ret = tvDerefIndirect(elm->m_tv);
     if (ret->m_type == KindOfUninit) {
-      TV_WRITE_NULL(ret);
+      tvWriteNull(ret);
     }
     return ret;
   }
@@ -324,7 +324,7 @@ private:
     Elm* elm = insert(name);
     if (!elm->m_tv) {
       addStorage(elm);
-      TV_WRITE_UNINIT(elm->m_tv);
+      tvWriteUninit(elm->m_tv);
       tvBindIndirect(elm->m_tv, loc);
       return 0;
     }
@@ -493,10 +493,7 @@ inline NameValueTable::~NameValueTable() {
   if (!m_table) return;
 
   for (Iterator iter(this); iter.valid(); iter.next()) {
-    const StringData* sd = iter.curKey();
-    if (sd->decRefCount() == 0) {
-      const_cast<StringData*>(iter.curKey())->release();
-    }
+    decRefStr(const_cast<StringData*>(iter.curKey()));
     const TypedValue* tv = iter.curValRaw();
     if (tv->m_type != KindOfIndirect) {
       tvRefcountedDecRef(const_cast<TypedValue*>(tv));

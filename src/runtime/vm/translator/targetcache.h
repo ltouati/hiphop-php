@@ -19,7 +19,7 @@
 #include <runtime/vm/func.h>
 #include <util/util.h>
 #include <runtime/vm/translator/types.h>
-#include <runtime/vm/translator/asm-x64.h>
+#include <util/asm-x64.h>
 #include <boost/static_assert.hpp>
 
 namespace HPHP {
@@ -93,7 +93,7 @@ CacheHandle namedAlloc(const StringData* name, int numBytes, int align) {
 
 size_t allocBit();
 size_t allocCnsBit(const StringData* name);
-CacheHandle bitOffToHandleAndMask(size_t bit, uint32 &mask);
+CacheHandle bitOffToHandleAndMask(size_t bit, uint8 &mask);
 bool testBit(CacheHandle handle, uint32 mask);
 bool testBit(size_t bit);
 bool testAndSetBit(CacheHandle handle, uint32 mask);
@@ -201,7 +201,7 @@ struct FixedFuncCache {
     thiz->m_func = NULL;
   }
 
-  static void lookupFailed(StringData* name);
+  static const Func* lookupUnknownFunc(StringData* name);
 };
 
 struct StaticMethodCache {
@@ -227,27 +227,9 @@ struct StaticMethodFCache {
                             const StringData* meth);
 };
 
-struct MethodCacheEntry {
-  intptr_t m_data;
-  void set(const Func* func, bool isMagicCall, bool isStatic) {
-    ASSERT(func);
-    ASSERT((intptr_t(func) & 0x3) == 0);
-    m_data = intptr_t(func) | intptr_t(isMagicCall) | (intptr_t(isStatic) << 1);
-  }
-  bool isMagicCall() const {
-    return (m_data & 1);
-  }
-  bool isStatic() const {
-    return (m_data & 2);
-  }
-  const Func* getFunc() const {
-    return (const Func*)(m_data & ~3);
-  }
-};
-
 typedef Cache<const StringData*, const Func*, StringData*, NSDynFunction>
   FuncCache;
-typedef Cache<const Class*, MethodCacheEntry, ActRec*, NSInvalid, 1, void>
+typedef Cache<uintptr_t, const Func*, ActRec*, NSInvalid, 1, void>
   MethodCache;
 typedef Cache<StringData*, const Class*, StringData*, NSClass> ClassCache;
 
@@ -316,9 +298,7 @@ struct PropNameKey {
   }
 
   void destroy() {
-    if (name && name->decRefCount() == 0) {
-      name->release();
-    }
+    if (name) decRefStr(name);
   }
 };
 

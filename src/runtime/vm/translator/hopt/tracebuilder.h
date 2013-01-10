@@ -60,8 +60,8 @@ public:
   SSATmp* genLdThis(Trace* trace);
   SSATmp* genLdVarEnv();
   SSATmp* genLdRetAddr();
-  SSATmp* genLdRaw(SSATmp* baseAddr, SSATmp* offset, Type::Tag type);
-  void    genStRaw(SSATmp* base, int64 offset, SSATmp* value);
+  SSATmp* genLdRaw(SSATmp* base, RawMemSlot::Kind kind, Type::Tag type);
+  void    genStRaw(SSATmp* base, RawMemSlot::Kind kind, SSATmp* value);
 
   SSATmp* genLdLoc(uint32 id);
   SSATmp* genLdLoc(uint32 id, Type::Tag type, Trace* exitTrace);
@@ -80,9 +80,12 @@ public:
   void    genSetPropCell(SSATmp* base, int64 offset, SSATmp* value);
 
   SSATmp* genBoxLoc(uint32 id);
-  void    genBindLoc(uint32 id, SSATmp* ref);
+  void    genBindLoc(uint32 id, SSATmp* ref, bool doRefCount = true);
   void    genInitLoc(uint32 id, SSATmp* t);
   void    killLocalValue(int id);
+  bool    anyLocalHasValue(SSATmp* tmp) const;
+  bool    isValueAvailable(SSATmp* tmp) const;
+
   SSATmp* genLdHome(uint32 id);
   SSATmp* genLdCachedClass(SSATmp* classNameOpnd);
   SSATmp* genLdCls(SSATmp* classNameOpnd);
@@ -94,6 +97,8 @@ public:
   SSATmp* genLdFuncCls(SSATmp* func);
   SSATmp* genNewObj(int32 numParams, const StringData* clsName);
   SSATmp* genNewObj(int32 numParams, SSATmp* cls);
+  SSATmp* genNewArray(int32 capacity);
+  SSATmp* genNewTuple(int32 numArgs, SSATmp* sp);
   // The first three genAllocActRecs delegate to the forth one
   SSATmp* genAllocActRec(const Func* func,
                          SSATmp* objOrCls,
@@ -107,6 +112,8 @@ public:
                          const StringData* magicName);
   SSATmp* genAllocActRec(); // creates an uninitialized actrec
   SSATmp* genFreeActRec();
+  void    genGuardLoc(uint32 id, Type::Tag type, Trace* exitTrace);
+  void    genGuardStk(uint32 id, Type::Tag type, Trace* exitTrace);
   SSATmp* genGuardType(SSATmp* src, Type::Tag type, Trace* nextTrace);
   void    genGuardRefs(SSATmp* funcPtr,
                        SSATmp* nParams,
@@ -147,11 +154,12 @@ public:
   SSATmp* genConvToObj(SSATmp* src);
   SSATmp* genLdPropAddr(SSATmp* obj, SSATmp* prop);
   SSATmp* genLdClsPropAddr(SSATmp* cls, SSATmp* clsName, SSATmp* propName);
-  SSATmp* genLdClsMethod(SSATmp* methodName, SSATmp* classOpnd);
-  SSATmp* genLdClsMethod(SSATmp* className,
-                         SSATmp* methodName,
-                         SSATmp* baseClass,
-                         Trace* slowPathExit);
+  SSATmp* genLdClsMethod(SSATmp* cls, uint32 methodSlot);
+  SSATmp* genLdClsMethodCache(SSATmp* methodName, SSATmp* classOpnd);
+  SSATmp* genLdClsMethodCache(SSATmp* className,
+                              SSATmp* methodName,
+                              SSATmp* baseClass,
+                              Trace* slowPathExit);
   SSATmp* genLdObjMethod(const StringData* methodName, SSATmp* obj);
   SSATmp* genLdObjClass(SSATmp* obj);
   SSATmp* genLdFunc(SSATmp* funcName, SSATmp* actRec);
@@ -173,6 +181,7 @@ public:
   void genDecRefThis();
   void genDecRefLocalsThis(uint32 numLocals);
   void genDecRefLocals(uint32 numLocals);
+  void genIncStat(int32 counter, int32 value);
   SSATmp* genIncRef(SSATmp* src);
   SSATmp* genSpillStack(uint32 stackAdjustment,
                         uint32 numOpnds,
@@ -180,7 +189,7 @@ public:
                         bool allocActRec = false);
   SSATmp* genLdStack(int32 stackOff, Type::Tag type, Trace* target);
   SSATmp* genDefFP();
-  SSATmp* genDefSP(SSATmp* fpOpnd, uint32 offsetFromFp);
+  SSATmp* genDefSP();
   SSATmp* genLdStackAddr(int64 offset);
   SSATmp* genQueryOp(Opcode queryOpc, SSATmp* addr);
   Trace*  genVerifyParamType(SSATmp* objClass, SSATmp* className,
@@ -189,19 +198,18 @@ public:
 
   void    genNativeImpl();
 
-  SSATmp* genLdContThisOrCls(SSATmp* cont);
   SSATmp* genCreateCont(bool getArgs, const Func* origFunc,
                         const Func* genFunc);
   void    genFillContLocals(const Func* origFunc, const Func* genFunc,
                             SSATmp* cont);
   void    genFillContThis(SSATmp* cont, SSATmp* locals, int64 offset);
-  SSATmp* genUnpackCont(SSATmp* cont, SSATmp* locals);
-  Trace*  genExitOnContVars(SSATmp* cont, Trace* target);
-  void    genPackCont(SSATmp* cont, SSATmp* value, int32 label,
-                      const Func* func);
+  void    genUnlinkContVarEnv();
+  void    genLinkContVarEnv();
   Trace*  genContRaiseCheck(SSATmp* cont, Trace* target);
   Trace*  genContPreNext(SSATmp* cont, Trace* target);
   Trace*  genContStartedCheck(SSATmp* cont, Trace* target);
+
+  void    genIncStat(SSATmp* counter, SSATmp* value);
 
   SSATmp* genInterpOne(uint32 pcOff, uint32 stackAdjustment,
                        Type::Tag resultType, Trace* target);
@@ -232,11 +240,13 @@ public:
   void killCse();
   void killLocals();
   void updateLocalRefValues(SSATmp* oldRef, SSATmp* newRef);
-  Local* getLocal(uint32 id);
+  Local getLocal(uint32 id);
   IRInstruction* appendInstruction(IRInstruction* inst);
   SSATmp* getLocalValue(int id);
   Type::Tag getLocalType(int id);
   void setLocalValue(int id, SSATmp* value);
+  void setLocalType(int id, Type::Tag type);
+
   void finalizeTrace();
 
   template<Type::Tag T>
@@ -264,6 +274,9 @@ public:
   SSATmp* getSp() { return m_spValue; }
 private:
   friend class Simplifier;
+  LabelInstruction* getLabel(Trace* trace) {
+    return trace ? trace->getLabel() : NULL;
+  }
   SSATmp* genInstruction(Opcode,
                          Type::Tag,
                          SSATmp* src1,

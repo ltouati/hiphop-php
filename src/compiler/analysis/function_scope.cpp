@@ -304,6 +304,10 @@ bool FunctionScope::isVariableArgument() const {
   return res;
 }
 
+bool FunctionScope::ignoreRedefinition() const {
+  return m_attribute & FileScope::IgnoreRedefinition;
+}
+
 bool FunctionScope::isReferenceVariableArgument() const {
   bool res = (m_attribute & FileScope::ReferenceVariableArgument) &&
              !m_overriding;
@@ -318,6 +322,11 @@ bool FunctionScope::isMixedVariableArgument() const {
   // If this method returns true, then isReferenceVariableArgument()
   // must also return true.
   ASSERT(!res || isReferenceVariableArgument());
+  return res;
+}
+
+bool FunctionScope::needsActRec() const {
+  bool res = (m_attribute & FileScope::NeedsActRec);
   return res;
 }
 
@@ -361,6 +370,10 @@ void FunctionScope::setVariableArgument(int reference) {
   }
 }
 
+void FunctionScope::setIgnoreRedefinition() {
+  m_attribute |= FileScope::IgnoreRedefinition;
+}
+
 bool FunctionScope::hasEffect() const {
   return (m_attribute & FileScope::NoEffect) == 0;
 }
@@ -377,6 +390,10 @@ bool FunctionScope::isFoldable() const {
 
 void FunctionScope::setIsFoldable() {
   m_attribute |= FileScope::IsFoldable;
+}
+
+void FunctionScope::setNeedsActRec() {
+  m_attribute |= FileScope::NeedsActRec;
 }
 
 void FunctionScope::setHelperFunction() {
@@ -401,7 +418,7 @@ bool FunctionScope::hasImpl() const {
 bool FunctionScope::isConstructor(ClassScopePtr cls) const {
   return m_stmt && cls
     && (getName() == "__construct"
-     || cls->classNameCtor() && getName() == cls->getName());
+     || (cls->classNameCtor() && getName() == cls->getName()));
 }
 
 bool FunctionScope::isMagic() const {
@@ -744,11 +761,17 @@ void FunctionScope::setParamName(int index, const std::string &name) {
   m_paramNames[index] = name;
 }
 
-void FunctionScope::setParamDefault(int index, const std::string &value,
+void FunctionScope::setParamDefault(int index, const char* value, int64_t len,
                                     const std::string &text) {
   ASSERT(index >= 0 && index < (int)m_paramNames.size());
-  m_paramDefaults[index] = value;
+  StringData* sd = new StringData(value, len, AttachLiteral);
+  sd->setStatic();
+  m_paramDefaults[index] = String(sd);
   m_paramDefaultTexts[index] = text;
+}
+
+CStrRef FunctionScope::getParamDefault(int index) {
+  return m_paramDefaults[index];
 }
 
 void FunctionScope::addModifier(int mod) {
@@ -1310,7 +1333,7 @@ void FunctionScope::OutputCPPArguments(ExpressionListPtr params,
     if (i > 0) cg_printf(extra && !callUserFuncFewArgs ? "." : ", ");
     if (!extra && (i == iMax || extraArg < 0)) {
       if (extraArgArrayId != -1) {
-        assert(extraArgArrayHash != -1 && extraArgArrayIndex != -1);
+        always_assert(extraArgArrayHash != -1 && extraArgArrayIndex != -1);
         ar->outputCPPScalarArrayId(cg, extraArgArrayId, extraArgArrayHash,
                                    extraArgArrayIndex);
         break;
@@ -1321,7 +1344,7 @@ void FunctionScope::OutputCPPArguments(ExpressionListPtr params,
         if (Option::GenArrayCreate &&
             cg.getOutput() != CodeGenerator::SystemCPP) {
           if (!params->hasNonArrayCreateValue(false, i)) {
-            assert(!callUserFuncFewArgs);
+            always_assert(!callUserFuncFewArgs);
             if (ar->m_arrayIntegerKeyMaxSize < paramCount - i) {
               ar->m_arrayIntegerKeyMaxSize  = paramCount - i;
             }
@@ -1573,7 +1596,7 @@ void FunctionScope::outputCPPDynamicInvoke(CodeGenerator &cg,
         Variant tmp;
         MethodStatementPtr m(dynamic_pointer_cast<MethodStatement>(m_stmt));
         ExpressionListPtr params = m->getParams();
-        assert(params && params->getCount() > i);
+        always_assert(params && params->getCount() > i);
         ParameterExpressionPtr p(
           dynamic_pointer_cast<ParameterExpression>((*params)[i]));
         ExpressionPtr defVal = p->defaultValue();
@@ -1607,7 +1630,7 @@ void FunctionScope::outputCPPDynamicInvoke(CodeGenerator &cg,
         } else {
           MethodStatementPtr m(dynamic_pointer_cast<MethodStatement>(m_stmt));
           ExpressionListPtr params = m->getParams();
-          assert(params && params->getCount() > i);
+          always_assert(params && params->getCount() > i);
           ParameterExpressionPtr p(
             dynamic_pointer_cast<ParameterExpression>((*params)[i]));
 
@@ -1922,6 +1945,9 @@ void FunctionScope::outputCPPClassMap(CodeGenerator &cg, AnalysisResultPtr ar) {
   if (m_method && isConstructor(getContainingClass())) {
     attribute |= ClassInfo::IsConstructor;
   }
+  if (needsActRec()) {
+    attribute |= ClassInfo::NeedsActRec;
+  }
 
   // Use the original cased name, for reflection to work correctly.
   cg_printf("(const char *)0x%04X, \"%s\", \"%s\", (const char *)%d, "
@@ -1942,6 +1968,14 @@ void FunctionScope::outputCPPClassMap(CodeGenerator &cg, AnalysisResultPtr ar) {
     cg_printf("\"%s\",\n", dc.c_str());
   }
 
+  if (attribute & ClassInfo::IsSystem) {
+    if (m_returnType) {
+      cg_printf("(const char *)0x%x, ", m_returnType->getDataType());
+    } else {
+      cg_printf("(const char *)-1, ");
+    }
+  }
+
   Variant defArg;
   for (int i = 0; i < m_maxParam; i++) {
     int attr = ClassInfo::IsNothing;
@@ -1954,12 +1988,15 @@ void FunctionScope::outputCPPClassMap(CodeGenerator &cg, AnalysisResultPtr ar) {
       dynamic_pointer_cast<MethodStatement>(getStmt());
     if (m) {
       ExpressionListPtr params = m->getParams();
-      assert(i < params->getCount());
+      always_assert(i < params->getCount());
       ParameterExpressionPtr param =
         dynamic_pointer_cast<ParameterExpression>((*params)[i]);
-      assert(param);
+      always_assert(param);
       cg_printf("\"%s\", ", param->hasTypeHint() ?
                             param->getOriginalTypeHint().c_str() : "");
+      if (attribute & ClassInfo::IsSystem) {
+        cg_printf("(const char *)-1, ");
+      }
       ExpressionPtr def = param->defaultValue();
       if (def) {
         std::string sdef = def->getText();
@@ -2002,6 +2039,9 @@ void FunctionScope::outputCPPClassMap(CodeGenerator &cg, AnalysisResultPtr ar) {
       cg_printf("NULL,\n");
     } else {
       cg_printf("\"\", ");
+      if (attribute & ClassInfo::IsSystem) {
+        cg_printf("(const char *)0x%x, ", m_paramTypes[i]->getDataType());
+      }
       std::string def = string_cplus_escape(m_paramDefaults[i].data(),
                                             m_paramDefaults[i].size());
       std::string defText = string_cplus_escape(m_paramDefaultTexts[i].data(),
@@ -2527,7 +2567,7 @@ void FunctionScope::outputMethodWrapper(CodeGenerator &cg,
         cg_printf("return ");
       }
 
-      assert(!isStatic());
+      always_assert(!isStatic());
       cg_printf("%sinvoke(\"%s\", params, -1);\n",
                 Option::ObjectPrefix, m_name.c_str());
     }

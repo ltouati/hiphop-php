@@ -25,7 +25,7 @@
 #include <compiler/option.h>
 #include <runtime/base/runtime_option.h>
 #include <pcre.h>
-#include <test/test_mysql_info.inc>
+#include <src/test/test_mysql_info.h>
 #include <runtime/ext/ext_file.h>
 
 using std::istringstream;
@@ -604,6 +604,9 @@ bool TestCodeRun::RunTests(const std::string &which) {
 
   // PHP 5.4 features
   GEN_TEST(TestTraits);
+
+  // PHP 5.5 features
+  GEN_TEST(TestUConverter);
 
   // HipHop features
   GEN_TEST(TestYield);
@@ -3152,6 +3155,161 @@ bool TestCodeRun::TestArrayIterator() {
         "  &int(5)\n"
         "}\n");
 
+  MVCR("<?php"
+       "function ex($m) {"
+       "  var_dump('Throwing: '.$m);"
+       "  throw new Exception($m);"
+       "}"
+       "class A {"
+       "  public function __construct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "}"
+       "class B {"
+       "  public $a;"
+       "  public function gen() {"
+       "    ex('die!');"
+       "    yield(2);"
+       "  }"
+       "  function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "}"
+       "class II {"
+       "  private $tn, $tv;"
+       "  function __construct($tn, $tv) { $this->tn = $tn; $this->tv = $tv; }"
+       "  function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function gen() { return new I($this->tn, $this->tv); }"
+       "}"
+       "class JJ {"
+       "  private $tn, $tv;"
+       "  function __construct($tn, $tv) { $this->tn = $tn; $this->tv = $tv; }"
+       "  function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function gen() { return new J($this->tn, $this->tv); }"
+       "}"
+       "class KK {"
+       "  private $tn, $tv;"
+       "  function __construct($tn, $tv) { $this->tn = $tn; $this->tv = $tv; }"
+       "  function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function gen() { return new K($this->tn, $this->tv); }"
+       "}"
+       "class LL {"
+       "  private $tn, $tv;"
+       "  function __construct($tn, $tv) { $this->tn = $tn; $this->tv = $tv; }"
+       "  function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function gen() { return new L($this->tn, $this->tv); }"
+       "}"
+       "class I implements Iterator"
+       "{"
+       "  private $tn, $tv, $i = 0;"
+       "  public function gen() { return $this; }"
+       "  public function __construct($tn, $tv) {"
+       "    $this->tn = $tn;"
+       "    $this->tv = $tv;"
+       "  }"
+       "  public function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function rewind() {"
+       "    var_dump(__METHOD__);"
+       "    if ($this->tn == 0) ex(__METHOD__);"
+       "    $this->i = 1;"
+       "  }"
+       "  public function current() {"
+       "    var_dump(__METHOD__);"
+       "    return $this->i;"
+       "  }"
+       "  public function key() {"
+       "    var_dump(__METHOD__);"
+       "    return $this->i;"
+       "  }"
+       "  public function next() {"
+       "    var_dump(__METHOD__);"
+       "    if ($this->tn == $this->i) ex(__METHOD__);"
+       "    return ++$this->i;"
+       "  }"
+       "  public function valid() {"
+       "    var_dump(__METHOD__);"
+       "    if ($this->tv == $this->i) ex(__METHOD__);"
+       "    return $this->i < 10;"
+       "  }"
+       "}"
+       "class J implements IteratorAggregate {"
+       "  private $i;"
+       "  public function __construct($tn, $tv) {"
+       "    $this->i = new I($tn, $tv);"
+       "  }"
+       "  public function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function getIterator() { return $this->i; }"
+       "  public function gen() { return $this; }"
+       "}"
+       "class K implements IteratorAggregate {"
+       "  private $tn, $tv;"
+       "  public function __construct($tn, $tv) {"
+       "    $this->tn = $tn;"
+       "    $this->tv = $tv;"
+       "  }"
+       "  public function __destruct() {"
+       "    var_dump(__METHOD__);"
+       "  }"
+       "  public function getIterator() { return new I($this->tn, $this->tv); }"
+       "  public function gen() { return $this; }"
+       "}"
+       "class L implements IteratorAggregate {"
+       "  public function getIterator() { ex(__METHOD__); }"
+       "  public function gen() { return $this; }"
+       "}"
+       "function run($n, $tn, $tv) {"
+       "  var_dump('>>>main');"
+       "  $a = new A();"
+       "  $b = new $n($tn, $tv);"
+       "  $b->a = $a;"
+       "  try {"
+       "    foreach ($b->gen() as $k) {"
+       "      var_dump('got '.$k);"
+       "    }"
+       "  } catch(Exception $e) {"
+       "    var_dump('Exception: ' . $e->getMessage());"
+       "    unset($e);"
+       "  }"
+       "  unset($b);"
+       "  var_dump('<<<main');"
+       "}"
+       "function test($n, $tn, $tv) {"
+       "  run($n, $tn, $tv);"
+       "  var_dump('Done: '.$n);"
+       "}"
+       "function triple($n) {"
+       "  test($n, 0, 0);"
+       "  test($n, -1, 1);"
+       "  test($n, 2,-1);"
+       "}"
+       "function main() {"
+       "  triple('I');"
+       "  triple('J');"
+       "  triple('K');"
+       "  triple('L');"
+       "  triple('II');"
+       "  triple('JJ');"
+       "  triple('KK');"
+       "  triple('LL');"
+       "  test('B', 0, 0);"
+       "}"
+       "main();");
+
   return true;
 }
 
@@ -4718,6 +4876,16 @@ bool TestCodeRun::TestArrayForEach() {
        "}"
        "test();"
        "var_dump('exit');");
+
+  MVCR("<?php\n"
+       "function main() {\n"
+       "  echo \"Entering main\\n\";\n"
+       "  foreach (array(1 => 1) as $k => $v) {\n"
+       "    break;\n"
+       "  }\n"
+       "  echo \"Leaving main\\n\";\n"
+       "}\n"
+       "main();\n");
 
   return true;
 }
@@ -9146,6 +9314,181 @@ bool TestCodeRun::TestCollectionClasses() {
         "NULL\n"
         );
 
+  MVCRO("<?php\n"
+        "$v = new Vector;\n"
+        "$v[] = 'c';\n"
+        "$v[] = 'a';\n"
+        "$v[] = 'b';\n"
+        "sort($v);\n"
+        "foreach ($v as $key => $val) {\n"
+        "  echo $key . ' ' . $val . \"\\n\";\n"
+        "}\n"
+        "echo \"=======\\n\";\n"
+        "$s = new StableMap;\n"
+        "$s['w'] = 2;\n"
+        "$s['v'] = 4;\n"
+        "$s['y'] = 3;\n"
+        "$s['x'] = 5;\n"
+        "$s['z'] = 1;\n"
+        "ksort($s);\n"
+        "foreach ($s as $key => $val) {\n"
+        "  echo $key . ' ' . $val . \"\\n\";\n"
+        "}\n"
+        "echo \"=======\\n\";\n"
+        "asort($s);\n"
+        "foreach ($s as $key => $val) {\n"
+        "  echo $key . ' ' . $val . \"\\n\";\n"
+        "}\n"
+        ,
+        "0 a\n"
+        "1 b\n"
+        "2 c\n"
+        "=======\n"
+        "v 4\n"
+        "w 2\n"
+        "x 5\n"
+        "y 3\n"
+        "z 1\n"
+        "=======\n"
+        "z 1\n"
+        "w 2\n"
+        "y 3\n"
+        "v 4\n"
+        "x 5\n"
+        );
+
+  MVCRO("<?php\n"
+        "function cmp($x, $y) {\n"
+        "  if ($x < $y) return 1;\n"
+        "  if ($x > $y) return -1;\n"
+        "  return 0;\n"
+        "}\n"
+        "$v = new Vector;\n"
+        "$v[] = 'c';\n"
+        "$v[] = 'a';\n"
+        "$v[] = 'b';\n"
+        "usort($v, 'cmp');\n"
+        "foreach ($v as $key => $val) {\n"
+        "  echo $key . ' ' . $val . \"\\n\";\n"
+        "}\n"
+        "echo \"=======\\n\";\n"
+        "$s = new StableMap;\n"
+        "$s['w'] = 2;\n"
+        "$s['v'] = 4;\n"
+        "$s['y'] = 3;\n"
+        "$s['x'] = 5;\n"
+        "$s['z'] = 1;\n"
+        "uksort($s, 'cmp');\n"
+        "foreach ($s as $key => $val) {\n"
+        "  echo $key . ' ' . $val . \"\\n\";\n"
+        "}\n"
+        "echo \"=======\\n\";\n"
+        "uasort($s, 'cmp');\n"
+        "foreach ($s as $key => $val) {\n"
+        "  echo $key . ' ' . $val . \"\\n\";\n"
+        "}\n"
+        ,
+        "0 c\n"
+        "1 b\n"
+        "2 a\n"
+        "=======\n"
+        "z 1\n"
+        "y 3\n"
+        "x 5\n"
+        "w 2\n"
+        "v 4\n"
+        "=======\n"
+        "x 5\n"
+        "v 4\n"
+        "y 3\n"
+        "w 2\n"
+        "z 1\n"
+        );
+
+  MVCRO("<?hh\n"
+        "function f() {\n"
+        "  var_dump(Vector {});\n"
+        "  var_dump(Map {});\n"
+        "  var_dump(Vector { 1, 2 });\n"
+        "  var_dump(StableMap { 'a' => 1, 'b' => 2 });\n"
+        "\n"
+        "  var_dump(Vector<int> {});\n"
+        "  var_dump(Map<string,int> {});\n"
+        "  var_dump(Vector<int> { 1, 2 });\n"
+        "  var_dump(StableMap<string,int> { 'a' => 1, 'b' => 2 });\n"
+        "}\n"
+        "f();\n"
+        ,
+        "object(Vector)#1 (0) {\n"
+        "}\n"
+        "object(Map)#1 (0) {\n"
+        "}\n"
+        "object(Vector)#1 (2) {\n"
+        "  [0]=>\n"
+        "  int(1)\n"
+        "  [1]=>\n"
+        "  int(2)\n"
+        "}\n"
+        "object(StableMap)#1 (2) {\n"
+        "  [\"a\"]=>\n"
+        "  int(1)\n"
+        "  [\"b\"]=>\n"
+        "  int(2)\n"
+        "}\n"
+        "object(Vector)#1 (0) {\n"
+        "}\n"
+        "object(Map)#1 (0) {\n"
+        "}\n"
+        "object(Vector)#1 (2) {\n"
+        "  [0]=>\n"
+        "  int(1)\n"
+        "  [1]=>\n"
+        "  int(2)\n"
+        "}\n"
+        "object(StableMap)#1 (2) {\n"
+        "  [\"a\"]=>\n"
+        "  int(1)\n"
+        "  [\"b\"]=>\n"
+        "  int(2)\n"
+        "}\n"
+        );
+
+  MVCRO("<?php\n"
+        "function f($x1, $x2, $x3, $x4) {\n"
+        "  return Vector { $x1, $x2, $x3, $x4 };\n"
+        "}\n"
+        "function g($k1, $v1, $k2, $v2) {\n"
+        "  $m = Map { $k1 => $v1, $k2 => $v2 };\n"
+        "  return $m;\n"
+        "}\n"
+        "var_dump(f(42, 123.456, 'blah', array(3, 5, 7)));\n"
+        "var_dump(g('foo', 1, 2, 'bar'));\n"
+        ,
+        "object(Vector)#1 (4) {\n"
+        "  [0]=>\n"
+        "  int(42)\n"
+        "  [1]=>\n"
+        "  float(123.456)\n"
+        "  [2]=>\n"
+        "  string(4) \"blah\"\n"
+        "  [3]=>\n"
+        "  array(3) {\n"
+        "    [0]=>\n"
+        "    int(3)\n"
+        "    [1]=>\n"
+        "    int(5)\n"
+        "    [2]=>\n"
+        "    int(7)\n"
+        "  }\n"
+        "}\n"
+        "object(Map)#1 (2) {\n"
+        "  [\"foo\"]=>\n"
+        "  int(1)\n"
+        "  [2]=>\n"
+        "  string(3) \"bar\"\n"
+        "}\n"
+        );
+
   return true;
 }
 
@@ -11171,6 +11514,44 @@ bool TestCodeRun::TestVolatile() {
         "int(2)\n"
        );
 
+  MVCRO("<?php "
+        "var_dump(fb_autoload_map("
+        "           array('function' => array(),"
+        "                 'constant' => array(),"
+        "                 'failure' => 'failure'),"
+        "           ''));"
+        "function failure($kind, $name) {"
+        "  if ($kind == 'constant' && $name == 'bar') define('bar', 'baz');"
+        "  var_dump($kind, $name);"
+        "}"
+        "var_dump(function_exists('foo'));"
+        "var_dump(function_exists('bar', false));"
+        "var_dump(defined('foo'));"
+        "var_dump(defined('bar', false));"
+        "var_dump(constant('foo'));"
+        "var_dump(constant('bar'));"
+        "if (0) {"
+        "  function foo() {}"
+        "  function foo() {}"
+        "  define('foo', 0);"
+        "  define('bar', 0);"
+        "}",
+        "bool(true)\n"
+        "string(8) \"function\"\n"
+        "string(3) \"foo\"\n"
+        "bool(false)\n"
+        "bool(false)\n"
+        "string(8) \"constant\"\n"
+        "string(3) \"foo\"\n"
+        "bool(false)\n"
+        "bool(false)\n"
+        "string(8) \"constant\"\n"
+        "string(3) \"foo\"\n"
+        "NULL\n"
+        "string(8) \"constant\"\n"
+        "string(3) \"bar\"\n"
+        "string(3) \"baz\"\n");
+
   return true;
 }
 
@@ -12153,6 +12534,22 @@ bool TestCodeRun::TestReflection() {
         "int(2)\n"
        );
 
+  MVCR("<?php "
+       "function __autoload($name) {"
+       "  switch ($name) {"
+       "    case 'C':"
+       "      class C {}"
+       "      break;"
+       "    case 'M':"
+       "      class M { function foo() {} }"
+       "      break;"
+       "    default: class C{} class M {}"
+       "  }"
+       "  var_dump($name);"
+       "}"
+       "$r1 = new ReflectionClass('C');"
+       "$r2 = new ReflectionMethod('M', 'foo');");
+
   return true;
 }
 
@@ -12520,6 +12917,14 @@ bool TestCodeRun::TestExtMisc() {
        "test();"
        "var_dump(class_exists('C'));");
 
+  MVCRO("<?php "
+        "var_dump(hex2bin(\";lwekn\"));"
+        "var_dump(hex2bin(\"68656c6c6f\"));"
+        "var_dump(hex2bin(\"68656c6c6f6\"));"
+        ,
+        "bool(false)\n"
+        "string(5) \"hello\"\n"
+        "bool(false)\n");
   return true;
 }
 
@@ -15899,6 +16304,52 @@ bool TestCodeRun::TestEvalOrder() {
        "$a = 'a'; $r = $a++ . $a++; var_dump($r);"
        "$a = 'a'; $b = 'b'; $r = $a . foo() . $b; var_dump($r);"
        "$a = 'a'; $b = 'b'; $r = $a . (foo() . $b); var_dump($r);");
+
+  MVCR("<?php "
+       "function test($x) {"
+       "  $a = array($a => $x[$a = 'foo']);"
+       "  return $a;"
+       "}"
+       "var_dump(test(array('foo' => 5)));");
+
+  MVCR("<?php "
+       "interface I {}"
+       "function __autoload($c) {"
+       "  var_dump($c);"
+       "  class A implements I {}"
+       "}"
+       "var_dump(class_implements(\"A\", false));"
+       "var_dump(class_implements(\"A\"));"
+       "var_dump(class_exists(\"A\"));");
+
+  MVCR("<?php "
+       "class B {}"
+       "function __autoload($c) {"
+       "  var_dump($c);"
+       "  class A extends B {}"
+       "}"
+       "var_dump(class_parents(\"A\", false));"
+       "var_dump(class_parents(\"A\"));"
+       "var_dump(class_exists(\"A\"));");
+
+  MVCRO("<?php "
+        "trait T {}"
+        "function __autoload($c) {"
+        "  var_dump($c);"
+        "  class A { use T; }"
+        "}"
+        "var_dump(class_uses(\"A\", false));"
+        "var_dump(class_uses(\"A\"));"
+        "var_dump(class_exists(\"A\"));"
+        ,
+        "bool(false)\n"
+        "string(1) \"A\"\n"
+        "array(1) {\n"
+        "  [\"T\"]=>\n"
+        "  string(1) \"T\"\n"
+        "}\n"
+        "bool(true)\n"
+        );
   return true;
 }
 
@@ -16539,6 +16990,7 @@ bool TestCodeRun::TestThrift() {
         "class TestStruct {"
         "  static $_TSPEC;"
         ""
+        "  public $aBool = null;"
         "  public $anInt = null;"
         "  public $aString = null;"
         "  public $aDouble = null;"
@@ -16552,6 +17004,10 @@ bool TestCodeRun::TestThrift() {
         "  public function __construct($vals=null) {"
         "    if (!isset(self::$_TSPEC)) {"
         "      self::$_TSPEC = array("
+        "        -1 => array("
+        "          'var' => 'aBool',"
+        "          'type' => TType::BOOL,"
+        "                   ),"
         "        1 => array("
         "          'var' => 'anInt',"
         "          'type' => TType::I32,"
@@ -16612,6 +17068,7 @@ bool TestCodeRun::TestThrift() {
         "function test() {"
         "  $p = new DummyProtocol();"
         "  $v1 = new TestStruct();"
+        "  $v1->aBool = true;"
         "  $v1->anInt = 1234;"
         "  $v1->aString = 'abcdef';"
         "  $v1->aDouble = 1.2345;"
@@ -16628,7 +17085,9 @@ bool TestCodeRun::TestThrift() {
         "}"
         "test();"
         ,
-        "object(TestStruct)#3 (9) {\n"
+        "object(TestStruct)#3 (10) {\n"
+        "  [\"aBool\"]=>\n"
+        "  bool(true)\n"
         "  [\"anInt\"]=>\n"
         "  int(1234)\n"
         "  [\"aString\"]=>\n"
@@ -16665,8 +17124,10 @@ bool TestCodeRun::TestThrift() {
         "  [\"anI16\"]=>\n"
         "  int(1234)\n"
         "}\n"
-        "string(32) \"281a6d52a9e687919fc8f5cbd12ab9c0\"\n"
-        "object(TestStruct)#4 (9) {\n"
+        "string(32) \"6b4fbe9563551f3dee970a74b883f923\"\n"
+        "object(TestStruct)#4 (10) {\n"
+        "  [\"aBool\"]=>\n"
+        "  bool(true)\n"
         "  [\"anInt\"]=>\n"
         "  int(1234)\n"
         "  [\"aString\"]=>\n"
@@ -16750,6 +17211,7 @@ bool TestCodeRun::TestThrift() {
       "class TestStruct {"
       "  static $_TSPEC;"
       ""
+      "  public $aBool = null;"
       "  public $anInt = null;"
       "  public $aDouble = null;"
       "  public $anInt64 = null;"
@@ -16759,6 +17221,10 @@ bool TestCodeRun::TestThrift() {
       "  public function __construct($vals=null) {"
       "    if (!isset(self::$_TSPEC)) {"
       "      self::$_TSPEC = array("
+      "        -1 => array("
+      "          'var' => 'aBool',"
+      "          'type' => TType::BOOL,"
+      "                   ),"
       "        1 => array("
       "          'var' => 'anInt',"
       "          'type' => TType::I32,"
@@ -16787,6 +17253,7 @@ bool TestCodeRun::TestThrift() {
       "function test() {"
       "  $p = new DummyProtocol();"
       "  $v1 = new TestStruct();"
+      "  $v1->aBool = false;"
       "  $v1->anInt = -1234;"
       "  $v1->aDouble = -1.2345;"
       "  $v1->anInt64 = -1;"
@@ -16797,7 +17264,9 @@ bool TestCodeRun::TestThrift() {
       "}"
       "test();",
 
-      "object(TestStruct)#4 (5) {\n"
+      "object(TestStruct)#4 (6) {\n"
+      "  [\"aBool\"]=>\n"
+      "  bool(false)\n"
       "  [\"anInt\"]=>\n"
       "  int(-1234)\n"
       "  [\"aDouble\"]=>\n"
@@ -16856,6 +17325,7 @@ bool TestCodeRun::TestThrift() {
       "class TestStruct {"
       "  static $_TSPEC;"
       "    "
+      "  public $aBool = null;"
       "  public $anInt = null;"
       "  public $aString = null;"
       "  public $aDouble = null;"
@@ -16869,6 +17339,10 @@ bool TestCodeRun::TestThrift() {
       "  public function __construct($vals=null) {"
       "    if (!isset(self::$_TSPEC)) {"
       "      self::$_TSPEC = array("
+      "        -1 => array("
+      "          'var' => 'aBool',"
+      "          'type' => TType::BOOL,"
+      "                   ),"
       "        1 => array("
       "          'var' => 'anInt',"
       "          'type' => TType::I32,"
@@ -16929,6 +17403,7 @@ bool TestCodeRun::TestThrift() {
       "function test() {"
       "  $p = new DummyProtocol();"
       "  $v1 = new TestStruct();"
+      "  $v1->aBool = true;"
       "  $v1->anInt = 1234;"
       "  $v1->aString = 'abcdef';"
       "  $v1->aDouble = 1.2345;"
@@ -16943,8 +17418,7 @@ bool TestCodeRun::TestThrift() {
       "}"
       "test();",
 
-      "string(32) \"1edc84e621f89a6eab9f5b0d2076aec1\"\n");
-
+      "string(32) \"cd0654ca200fe910204988f44f996a11\"\n");
   MVCRO(
       "<?php "
       "class TType {"
@@ -16994,6 +17468,7 @@ bool TestCodeRun::TestThrift() {
       "class TestStruct {"
       "  static $_TSPEC;"
       "    "
+      "  public $aBool = null;"
       "  public $anInt = null;"
       "  public $aString = null;"
       "  public $aDouble = null;"
@@ -17007,6 +17482,10 @@ bool TestCodeRun::TestThrift() {
       "  public function __construct($vals=null) {"
       "    if (!isset(self::$_TSPEC)) {"
       "      self::$_TSPEC = array("
+      "        -1 => array("
+      "          'var' => 'aBool',"
+      "          'type' => TType::BOOL,"
+      "                   ),"
       "        1 => array("
       "          'var' => 'anInt',"
       "          'type' => TType::I32,"
@@ -17067,6 +17546,7 @@ bool TestCodeRun::TestThrift() {
       "function test() {"
       "  $p = new DummyProtocol();"
       "  $v1 = new TestStruct();"
+      "  $v1->aBool = true;"
       "  $v1->anInt = 1234;"
       "  $v1->aString = 'abcdef';"
       "  $v1->aDouble = 1.2345;"
@@ -17084,7 +17564,9 @@ bool TestCodeRun::TestThrift() {
       "}"
       "test();",
 
-      "object(TestStruct)#4 (9) {\n"
+      "object(TestStruct)#4 (10) {\n"
+      "  [\"aBool\"]=>\n"
+      "  bool(true)\n"
       "  [\"anInt\"]=>\n"
       "  int(1234)\n"
       "  [\"aString\"]=>\n"
@@ -19280,6 +19762,10 @@ bool TestCodeRun::TestFile() {
        "fclose(STDOUT);"
        "echo 'test';"
        "ob_start();");
+  MVCR("<?php "
+       "define('BAR','Some Value');"
+       "var_dump(parse_ini_string('foo=BAR'));"
+      );
   return true;
 }
 
@@ -20414,6 +20900,40 @@ bool TestCodeRun::TestExtArray() {
       "array_walk_recursive($a, 'fix');\n"
       "var_dump($a['foo']);\n");
 
+  MVCR("<?php "
+       "function xsort(&$a) {"
+       "  $b = null;"
+       "  $b->foo =& $a;"
+       "  var_dump(is_object($b));"
+       "  $b = false;"
+       "  $b[0] =& $a;"
+       "  uksort($a, function ($i, $j) use(&$b) {"
+       "      if ($b[0][$i] == $b[0][$j]) return 0;"
+       "      return $b[0][$i] < $b[0][$j] ? -1 : 1;"
+       "    });"
+       "}"
+       "function test($x) {"
+       "  $a = array(220,250,240,$x);"
+       "  xsort($a);"
+       "  var_dump($a);"
+       "}"
+       "test(230);");
+
+  MVCR("<?php "
+       "function cmp($a, $b) {"
+       "  throw new Exception('Surprise!');"
+       "}"
+       "function test() {"
+       "  $a = array(1,2,3);"
+       "  try {"
+       "    usort($a, 'cmp');"
+       "    var_dump('unreached');"
+       "  } catch (Exception $e) {"
+       "    var_dump($e->getMessage());"
+       "  }"
+       "}"
+       "test();");
+
   return true;
 }
 
@@ -21012,6 +21532,22 @@ bool TestCodeRun::TestExtSoap() {
       "       '</ns1:Add>  </SOAP-ENV:Body></SOAP-ENV:Envelope>';"
       "$server->addFunction('Add');"
       "$server->handle($str);");
+
+  MVCR("<?php "
+       "class MySoap extends SoapClient {"
+       "  public $pub = 1;"
+       "  public function __doRequest("
+       "    $request, $location, $action, $version, $one_way=0) {"
+       "    $rp = parent::__doRequest($request, $location,"
+       "                              $action, $version, $one_way);"
+       "    return $rp;"
+       "  }"
+       "}"
+       "function test($options) {"
+       "  return new MySoap('test/test.wsdl', $options);"
+       "}"
+       "var_dump(test(array('foo' => 'bar'))->pub);");
+
   return true;
 }
 
@@ -23501,6 +24037,12 @@ bool TestCodeRun::TestYield() {
         "int(124)\n"
        );
 
+  MVCRO("<?php function fruit() { echo \"sadpanda, no fruit\"; yield break; } "
+        "foreach (fruit() as $fruit) { var_dump($fruit);} ",
+
+        "sadpanda, no fruit"
+       );
+
   MVCRO("<?php function fruit() { $a = 123; yield $a;yield break;yield ++$a;} "
         "foreach (fruit() as $fruit) { var_dump($fruit);} ",
 
@@ -24296,6 +24838,86 @@ bool TestCodeRun::TestYield() {
         "Finished!\n"
         "Returned from main safely\n");
 
+  MVCRO("<?php\n"
+        "class Foo implements Iterator {\n"
+        "  private $data = array(1, 2, 3);\n"
+        "\n"
+        "  public function current() {\n"
+        "    return current($this->data);\n"
+        "  }\n"
+        "  public function key() {\n"
+        "    return key($this->data);\n"
+        "  }\n"
+        "  public function next() {\n"
+        "    next($this->data);\n"
+        "  }\n"
+        "  public function rewind() {\n"
+        "    echo \"hagfish\\n\";\n"
+        "    reset($this->data);\n"
+        "  }\n"
+        "  public function valid() {\n"
+        "    return current($this->data);\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "function run_test() {\n"
+        "  $f = new Foo();\n"
+        "\n"
+        "  foreach ($f as $value) {\n"
+        "    echo $value . \"\\n\";\n"
+        "  }\n"
+        "\n"
+        "  yield 1230;\n"
+        "\n"
+        "  foreach($f as $value) {\n"
+        "    echo $value . \"\\n\";\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "foreach (run_test() as $_) {}\n",
+        "hagfish\n1\n2\n3\nhagfish\n1\n2\n3\n");
+
+  MVCRO("<?php\n"
+        "function gen(int $mode) {\n"
+        "  yield $mode;\n"
+        "  switch ($mode) {\n"
+        "    case 0: break;\n"
+        "    case 1: yield break;\n"
+        "    case 2: throw new Exception();\n"
+        "  }\n"
+        "  yield 47;\n"
+        "}\n"
+        "\n"
+        "for ($mode = 0; $mode < 3; ++$mode) {\n"
+        "  echo \"Testing mode $mode:\\n\";\n"
+        "  $gen = gen($mode);\n"
+        "  try {\n"
+        "    $gen->next();\n"
+        "    while ($gen->valid()) {\n"
+        "      var_dump($gen->current());\n"
+        "      $gen->next();\n"
+        "    }\n"
+        "  } catch (Exception $ex) {\n"
+        "    echo \"EXCEPTION\\n\";\n"
+        "  }\n"
+        "  var_dump($gen->valid());\n"
+        "  var_dump($gen->current());\n"
+        "}\n",
+        "Testing mode 0:\n"
+        "int(0)\n"
+        "int(47)\n"
+        "bool(false)\n"
+        "NULL\n"
+        "Testing mode 1:\n"
+        "int(1)\n"
+        "bool(false)\n"
+        "NULL\n"
+        "Testing mode 2:\n"
+        "int(2)\n"
+        "EXCEPTION\n"
+        "bool(false)\n"
+        "NULL\n");
+
   return true;
 }
 
@@ -24568,9 +25190,9 @@ bool TestCodeRun::TestHint() {
         "main();\n"
         ,
         "class Y extends X {\n"
-        "public function f($x1, $x2 = null, $x3 = 123, string $x4, "
-        "string $x5 = null, string $x6 = 'abc', array $x7, array $x8 = null, "
-        "C $x9, D $x10 = null, bool $x11, boolean $x12 = true, int $x13, "
+        "public function f($x1, $x2 = NULL, $x3 = 123, string $x4, "
+        "string $x5 = NULL, string $x6 = \"abc\", array $x7, array $x8 = NULL, "
+        "C $x9, D $x10 = NULL, bool $x11, boolean $x12 = true, int $x13, "
         "integer $x14 = 73, real $x15, double $x16 = 1.5, float $x17) {}\n"
         "}\n"
         );
@@ -27844,15 +28466,57 @@ bool TestCodeRun::TestTaintExt() {
 #endif
 
 bool TestCodeRun::TestParser() {
-  MVCRO("<?php function foo() { return array(1, 2, 3);} var_dump(foo()[2]);",
-        "int(3)\n");
+
+  MVCRO("<?php function foo() { return array(1, 2, 3);} var_dump(foo()[2]);"
+        ,
+        "int(3)\n"
+        );
+
   MVCRO("<?php "
         ":test::go();"
         "class :test {"
         "  static function go() {"
         "    echo \"Everything's cool\\n\";"
         "  }"
-        "}", "Everything's cool\n");
+        "}"
+        ,
+        "Everything's cool\n"
+        );
+
+  MVCRO("<?php\n"
+        "class Foo {\n"
+        "  public $a;\n"
+        "  static public $b;\n"
+        "  static public $c;\n"
+        "}\n"
+        "$foo = new Foo;\n"
+        "$foo->a = function ($x) { echo '!' . $x; };\n"
+        "($foo->a)(\"foo\\n\");\n"
+        "Foo::$b = function ($x) { echo '?' . $x; };\n"
+        "(Foo::$b)(\"bar\\n\");\n"
+        "Foo::$c[0] = function ($x) { echo '.' . $x; };\n"
+        "(Foo::$c[0])(\"baz\\n\");\n"
+        ,
+        "!foo\n"
+        "?bar\n"
+        ".baz\n"
+        );
+
+  MVCRO("<?php\n"
+        "($a) = 1;\n"
+        "var_dump($a);\n"
+        "$b = array();\n"
+        "($b)[0] = 2;\n"
+        "var_dump($b[0]);\n"
+        "$c = new stdClass;\n"
+        "($c)->prop = 3;\n"
+        "var_dump($c->prop);\n"
+        ,
+        "int(1)\n"
+        "int(2)\n"
+        "int(3)\n"
+        );
+
   return true;
 }
 
@@ -28155,6 +28819,14 @@ bool TestCodeRun::TestTypeAssertions() {
        "$d1 = new D1;\n"
        "$d1->d1prop = 3;\n"
        "$d1->doStuff();\n");
+
+  MVCR("<?php\n"
+       "    function foo() {\n"
+       "    }\n"
+       "    function main() {\n"
+       "      var_dump(is_null(foo()));\n"
+       "    }\n"
+       "    main();\n");
 
   return true;
 }
@@ -33023,6 +33695,186 @@ bool TestCodeRun::TestTraits() {
   return true;
 }
 
+bool TestCodeRun::TestUConverter() {
+  // ext/intl/tests/uconverter_enum.phpt
+  MVCRO("<?php "
+        "$avail = UConverter::getAvailable();"
+        "var_dump(count($avail) > 100);"
+        "var_dump(in_array('UTF-7', $avail));"
+        "var_dump(in_array('CESU-8', $avail));"
+        "var_dump(in_array('ISO-8859-1', $avail));"
+        "$latin1 = UConverter::getAliases('latin1');"
+        "var_dump(in_array('ISO-8859-1', $latin1));"
+       ,
+        "bool(true)\n"
+        "bool(true)\n"
+        "bool(true)\n"
+        "bool(true)\n"
+        "bool(true)\n"
+       );
+
+  // ext/intl/tests/uconverter_func_basic.phpt
+  MVCRO("<?php "
+        "var_dump(UConverter::transcode(\"This is an ascii string\", 'utf-8', 'latin1'));"
+        "var_dump(urlencode(UConverter::transcode(\"Espa\\xF1ol\", 'utf-8', 'latin1')));"
+        "var_dump(urlencode(UConverter::transcode(\"Stra\\xDFa\",  'utf-8', 'latin1')));"
+        "var_dump(bin2hex(UConverter::transcode(\"\\xE4\", 'utf-8', 'koi8-r')));"
+       ,
+        "string(23) \"This is an ascii string\"\n"
+        "string(12) \"Espa%C3%B1ol\"\n"
+        "string(11) \"Stra%C3%9Fa\"\n"
+        "string(4) \"d094\"\n"
+       );
+
+  // ext/intl/tests/uconverter_func_subst.phpt
+  MVCRO("<?php "
+        "foreach(array('?','','?" /* this is not a trigraph */ "?') as $subst) {"
+        "  $opts = array('to_subst' => $subst);"
+        "  $ret = UConverter::transcode(\"This is an ascii string\", 'ascii', 'utf-8', $opts);"
+        "  if ($ret === NULL) {"
+        "    echo \"Error: \", intl_get_error_message(), \"\\n\";"
+        "  } else {"
+        "    var_dump($ret);"
+        "  }"
+        "  $ret = UConverter::transcode(\"Snowman: (\\xE2\\x98\\x83)\", 'ascii', 'utf-8', $opts);"
+        "  if ($ret === NULL) {"
+        "    echo \"Error: \", intl_get_error_message(), \"\\n\";"
+        "  } else {"
+        "    var_dump($ret);"
+        "  }"
+        "}"
+       ,
+        "string(23) \"This is an ascii string\"\n"
+        "string(12) \"Snowman: (?)\"\n"
+        "Error: ucnv_setSubstChars() returned error 1: U_ILLEGAL_ARGUMENT_ERROR\n"
+        "Error: ucnv_setSubstChars() returned error 1: U_ILLEGAL_ARGUMENT_ERROR\n"
+        "Error: ucnv_setSubstChars() returned error 1: U_ILLEGAL_ARGUMENT_ERROR\n"
+        "Error: ucnv_setSubstChars() returned error 1: U_ILLEGAL_ARGUMENT_ERROR\n"
+       );
+
+  // ext/intl/tests/uconverter_oop_algo.phpt
+  MVCRO("<?php "
+        "$c = new UConverter('utf-8', 'latin1');"
+        "var_dump(UConverter::LATIN_1 === $c->getSourceType());"
+        "var_dump(UConverter::UTF8    === $c->getDestinationType());"
+        "$c = new UConverter('koi8-r', 'utf-32be');"
+        "var_dump(UConverter::UTF32_BigEndian === $c->getSourceType());"
+        "var_dump(UConverter::SBCS            === $c->getDestinationType());"
+       ,
+        "bool(true)\n"
+        "bool(true)\n"
+        "bool(true)\n"
+        "bool(true)\n"
+       );
+
+  // ext/intl/tests/uconverter_oop_basic.phpt
+  MVCRO("<?php "
+        "$c = new UConverter('utf-8', 'latin1');"
+        "var_dump($c->convert(\"This is an ascii string\"));"
+        "var_dump(urlencode($c->convert(\"Espa\\xF1ol\")));"
+        "var_dump(urlencode($c->convert(\"Stra\\xDFa\")));"
+        "var_dump(urlencode($c->convert(\"Stra\\xC3\\x9Fa\", true)));"
+        "$k = new UConverter('utf-8', 'koi8-r');"
+        "var_dump(bin2hex($k->convert(\"\\xE4\")));"
+       ,
+        "string(23) \"This is an ascii string\"\n"
+        "string(12) \"Espa%C3%B1ol\"\n"
+        "string(11) \"Stra%C3%9Fa\"\n"
+        "string(8) \"Stra%DFa\"\n"
+        "string(4) \"d094\"\n"
+       );
+
+  // ext/intl/tests/uconverter_oop_callback.phpt
+  MVCRO("<?php "
+        "class MyConverter extends UConverter {"
+        "  public function toUCallback($reason, $source, $codeUnits, &$error) {"
+        "    echo \"toUCallback(\", UConverter::reasonText($reason), \", ...)\\n\";"
+        "    return parent::toUCallback($reason, $source, $codeUnits, $error);"
+        "  }"
+        "  public function fromUCallback($reason, $source, $codePoint, &$error) {"
+        "    echo \"fromUCallback(\", UConverter::reasonText($reason), \", ...)\\n\";"
+        "    return parent::fromUCallback($reason, $source, $codePoint, $error);"
+        "  }"
+        "}"
+        "$c = new MyConverter('ascii', 'utf-8');"
+        "foreach(array(\"regular\", \"irregul\\xC1\\xA1r\", \"\\xC2\\xA1unsupported!\") as $word) {"
+        "  $c->convert($word);"
+        "}"
+        "unset($c);"
+       ,
+        "toUCallback(REASON_RESET, ...)\n"
+        "toUCallback(REASON_RESET, ...)\n"
+        "fromUCallback(REASON_RESET, ...)\n"
+        "fromUCallback(REASON_RESET, ...)\n"
+        "toUCallback(REASON_RESET, ...)\n"
+        "toUCallback(REASON_ILLEGAL, ...)\n"
+        "toUCallback(REASON_RESET, ...)\n"
+        "toUCallback(REASON_ILLEGAL, ...)\n"
+        "fromUCallback(REASON_RESET, ...)\n"
+        "fromUCallback(REASON_RESET, ...)\n"
+        "toUCallback(REASON_RESET, ...)\n"
+        "toUCallback(REASON_RESET, ...)\n"
+        "fromUCallback(REASON_RESET, ...)\n"
+        "fromUCallback(REASON_UNASSIGNED, ...)\n"
+        "fromUCallback(REASON_RESET, ...)\n"
+        "fromUCallback(REASON_UNASSIGNED, ...)\n"
+        "toUCallback(REASON_CLOSE, ...)\n"
+        "fromUCallback(REASON_CLOSE, ...)\n"
+        "toUCallback(REASON_CLOSE, ...)\n"
+        "fromUCallback(REASON_CLOSE, ...)\n"
+       );
+
+  // ext/intl/tests/uconverter_oop_callback_return.phpt
+  MVCRO("<?php "
+        "class MyConverter extends UConverter {"
+        "  public function toUCallback($reason, $source, $codeUnits, &$error) {"
+        "    $error = U_ZERO_ERROR;"
+        "    switch ($codeUnits) {"
+        "      case \"\\x80\": return NULL;"
+        "      case \"\\x81\": return 'a';"
+        "      case \"\\x82\": return ord('b');"
+        "      case \"\\x83\": return array('c');"
+        "    }"
+        "  }"
+        "  public function fromUCallback($reason, $source, $codePoint, &$error) {"
+        "    $error = U_ZERO_ERROR;"
+        "    switch ($codePoint) {"
+        "      case 0x00F1: return \"A\";"
+        "      case 0x00F2: return ord(\"B\");"
+        "      case 0x00F3: return array(\"C\");"
+        "      case 0x00F4: return NULL;"
+        "    }"
+        "  }"
+        "}"
+        "$c = new MyConverter('ascii', 'utf-8');"
+        "var_dump($c->convert(\"\\x80\\x81\\x82\\x83\"));"
+        "var_dump($c->convert(\"\\xC3\\xB1\\xC3\\xB2\\xC3\\xB3\\xC3\\xB4\"));"
+       ,
+        "string(3) \"abc\"\n"
+        "string(3) \"ABC\"\n"
+       );
+
+  // ext/intl/tests/uconverter_oop_subst.phpt
+  MVCRO("<?php "
+        "$c = new UConverter('ascii', 'utf-8');"
+        "foreach(array('?','','<unknown>') as $subst) {"
+        "  if (!$c->setSubstChars($subst)) {"
+        "    echo \"**Disallowed\\n\";"
+        "    continue;"
+        "  }"
+        "  var_dump($c->convert(\"This is an ascii string\"));"
+        "  var_dump($c->convert(\"Snowman: (\\xE2\\x98\\x83)\"));"
+        "}"
+       ,
+        "string(23) \"This is an ascii string\"\n"
+        "string(12) \"Snowman: (?)\"\n"
+        "**Disallowed\n"
+        "**Disallowed\n"
+       );
+
+  return true;
+}
+
 bool TestCodeRun::TestStrictMode() {
   HipHopSyntax w(this);
 
@@ -33042,6 +33894,13 @@ bool TestCodeRun::TestStrictMode() {
 
   // Silent type hint
   MVCRO("<?hh\nfunction foo(@int $x){ echo 1; } foo('hi');", "1");
+
+  // Combination of optional + generic
+  MVCRO("<?hh\nfunction foo(): Map<int, ?Vector<int>> {}", "");
+
+  // Arrays with generic types
+  MVCRO("<?hh\nfunction foo(array<int> $x) {}", "");
+  MVCRO("<?hh\nfunction foo(array<string, int> $x) {}", "");
 
   // Kitchen sink
   MVCRO("<?hh\n"
@@ -33073,6 +33932,46 @@ bool TestCodeRun::TestStrictMode() {
         "echo vidx($a, 0), Foo::BLEH, car($blork), $d();\n",
 
         "abcd");
+
+  MVCRO("<?hh\n"
+        "function f() {\n"
+        "  $x = new Foo<Bar>();\n"
+        "  $x = new Foo<Blah<Bar>>();\n"
+        "  $y = new Foo<array,int>();\n"
+        "  $z = new Foo<Blah<array>,Blah<int>>();\n"
+        "  yo<int>();\n"
+        "  yo<Blah<int>>();\n"
+        "  yo<string,:my:xhp:class>();\n"
+        "  yo<Blah<string>,Blah<:my:xhp:class>>();\n"
+        "  $x->baz<int>();\n"
+        "  $x->baz<Blah<int>>();\n"
+        "  $y->baz<string,:my:xhp:class>();\n"
+        "  $y->baz<Blah<string>,Blah<:my:xhp:class>>();\n"
+        "  Foo<Bar>::biz();\n"
+        "  Foo<Blah<Bar>>::biz();\n"
+        "  Foo<Bar>::biz<string>();\n"
+        "  Foo<Blah<Bar>>::biz<Blah<string>>();\n"
+        "  Foo<Bar>::biz<bool,:my:xhp:class>();\n"
+        "  Foo<Blah<Bar>>::biz<Blah<bool>,Blah<:my:xhp:class>>();\n"
+        "  Foo<array,int>::biz();\n"
+        "  Foo<Blah<array>,Blah<int>>::biz();\n"
+        "  Foo<array,int>::biz<string>();\n"
+        "  Foo<Blah<array>,Blah<int>>::biz<Blah<string>>();\n"
+        "  Foo<array,int>::biz<bool,:my:xhp:class>();\n"
+        "  Foo<Blah<array>,Blah<int>>::biz<Blah<bool>,Blah<:my:xhp:class>>();\n"
+        "  var_dump(Foo<Bar>::SOME_CONST);\n"
+        "  var_dump(Foo<Blah<Bar>>::SOME_CONST);\n"
+        "  var_dump(Foo<array,int>::SOME_CONST);\n"
+        "  var_dump(Foo<Blah<array>,Blah<int>>::SOME_CONST);\n"
+        "  var_dump(Foo<Bar>::$staticProp);\n"
+        "  var_dump(Foo<Blah<Bar>>::$staticProp);\n"
+        "  var_dump(Foo<array,int>::$staticProp);\n"
+        "  var_dump(Foo<Blah<array>,Blah<int>>::$staticProp);\n"
+        "}\n"
+        "echo \"Done\\n\";\n"
+        ,
+        "Done\n"
+        );
 
   return true;
 }

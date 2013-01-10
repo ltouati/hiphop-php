@@ -43,6 +43,11 @@ ConstantExpression::ConstantExpression
     m_valid(false), m_dynamic(false), m_visited(false), m_depsSet(false) {
 }
 
+void ConstantExpression::onParse(AnalysisResultConstPtr ar,
+                                 FileScopePtr scope) {
+  ar->parseOnDemandByConstant(m_name);
+}
+
 ExpressionPtr ConstantExpression::clone() {
   ConstantExpressionPtr exp(new ConstantExpression(*this));
   Expression::deepCopy(exp);
@@ -123,7 +128,7 @@ Symbol *ConstantExpression::resolveNS(AnalysisResultConstPtr ar) {
     if (!block) return 0;
   }
   Symbol *sym = const_cast<Symbol*>(block->getConstants()->getSymbol(m_name));
-  assert(sym);
+  always_assert(sym);
   return sym;
 }
 

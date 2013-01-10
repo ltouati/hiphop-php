@@ -43,6 +43,12 @@ StaticClassName::StaticClassName(ExpressionPtr classExp)
   }
 }
 
+void StaticClassName::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
+  if (!m_self && !m_parent && !m_static && !m_className.empty()) {
+    ar->parseOnDemandByClass(m_className);
+  }
+}
+
 void StaticClassName::updateClassName() {
   if (m_class && m_class->is(Expression::KindOfScalarExpression) &&
       !m_static) {
@@ -63,7 +69,7 @@ static BlockScopeRawPtr originalScope(StaticClassName *scn) {
 }
 
 void StaticClassName::resolveStatic(const string &name) {
-  assert(isStatic());
+  always_assert(isStatic());
   m_static = m_self = m_parent = false;
   m_present = false;
   m_class.reset();

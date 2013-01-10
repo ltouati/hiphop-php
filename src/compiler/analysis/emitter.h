@@ -38,6 +38,7 @@ DECLARE_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(FunctionCall);
 DECLARE_BOOST_TYPES(SimpleFunctionCall);
 DECLARE_BOOST_TYPES(SwitchStatement);
+DECLARE_BOOST_TYPES(ForEachStatement);
 class StaticClassName;
 
 namespace Compiler {
@@ -57,6 +58,7 @@ using namespace VM;
 class Label;
 class EmitterVisitor;
 
+// Helper for creating unit MetaInfo.
 struct MetaInfoBuilder {
   void add(int pos, Unit::MetaInfo::Kind kind,
            bool mVector, int arg, Id data);
@@ -83,7 +85,17 @@ public:
   EmitterVisitor& getEmitterVisitor() { return m_ev; }
   void setTempLocation(LocationPtr loc) { m_tempLoc = loc; }
   LocationPtr getTempLocation() { return m_tempLoc; }
+  void incStat(int counter, int value) {
+    if (RuntimeOption::EnableEmitterStats) {
+      IncStat(counter, value);
+    }
+  }
 
+  struct StrOff {
+    StrOff(Id s, Label* d) : str(s), dest(d) {}
+    Id str;
+    Label* dest;
+  };
 #define O(name, imm, pop, push, flags) \
   void name(imm);
 #define NA
@@ -93,8 +105,11 @@ public:
   typ1 a1, typ2 a2
 #define THREE(typ1, typ2, typ3) \
   typ1 a1, typ2 a2, typ3 a3
+#define FOUR(typ1, typ2, typ3, typ4) \
+  typ1 a1, typ2 a2, typ3 a3, typ4 a4
 #define MA std::vector<uchar>
 #define BLA std::vector<Label*>&
+#define SLA std::vector<StrOff>&
 #define IVA int32
 #define HA int32
 #define IA int32
@@ -110,7 +125,10 @@ public:
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef MA
+#undef BLA
+#undef SLA
 #undef IVA
 #undef HA
 #undef IA
@@ -313,7 +331,8 @@ public:
   void visitKids(ConstructPtr c);
   void visit(FileScopePtr file);
   void assignLocalVariableIds(FunctionScopePtr fs);
-  void fixReturnType(Emitter& e, FunctionCallPtr fn);
+  void fixReturnType(Emitter& e, FunctionCallPtr fn,
+                     bool isBuiltinCall = false);
   typedef std::vector<int> IndexChain;
   void visitListAssignmentLHS(Emitter& e, ExpressionPtr exp,
                               IndexChain& indexChain,
@@ -462,6 +481,18 @@ private:
       Offset m_end;
       Offset m_fpOff;
   };
+  typedef std::pair<Id, int> StrCase;
+  struct SwitchState : private boost::noncopyable {
+    SwitchState() : nonZeroI(-1), defI(-1) {}
+    std::map<int64, int> cases; // a map from int (or litstr id) to case index
+    std::vector<StrCase> caseOrder; // for string switches, a list of the
+                                    // <litstr id, case index> in the order
+                                    // they appear in the source
+    int nonZeroI;
+    int defI;
+  };
+
+  static const size_t kMinStringSwitchCases = 8;
   UnitEmitter& m_ue;
   FuncEmitter* m_curFunc;
   FileScopePtr m_file;
@@ -536,8 +567,13 @@ public:
   void emitClsIfSPropBase(Emitter& e);
   Label* getContinuationGotoLabel(StatementPtr s);
   void emitContinuationSwitch(Emitter& e, SwitchStatementPtr s);
-  bool emitIntegerSwitch(Emitter& e, SwitchStatementPtr s,
-                         std::vector<Label>& caseLabels, Label& done);
+  DataType analyzeSwitch(SwitchStatementPtr s, SwitchState& state);
+  void emitIntegerSwitch(Emitter& e, SwitchStatementPtr s,
+                         std::vector<Label>& caseLabels, Label& done,
+                         const SwitchState& state);
+  void emitStringSwitch(Emitter& e, SwitchStatementPtr s,
+                        std::vector<Label>& caseLabels, Label& done,
+                        const SwitchState& state);
 
   void markElem(Emitter& e);
   void markNewElem(Emitter& e);
@@ -576,14 +612,18 @@ public:
   };
 
   bool emitCallUserFunc(Emitter& e, SimpleFunctionCallPtr node);
+  bool canEmitBuiltinCall(FunctionCallPtr fn, const std::string& name,
+                          int numParams);
   void emitFuncCall(Emitter& e, FunctionCallPtr node);
   void emitFuncCallArg(Emitter& e, ExpressionPtr exp, int paramId);
+  void emitBuiltinCallArg(Emitter& e, ExpressionPtr exp, int paramId,
+                         bool byRef);
+  void emitBuiltinDefaultArg(Emitter& e, Variant& v, DataType t, int paramId);
   PreClass::Hoistable emitClass(Emitter& e, ClassScopePtr cNode,
                                 bool topLevel);
   void emitBreakHandler(Emitter& e, Label& brkTarg, Label& cntTarg,
       Label& brkHand, Label& cntHand, Id iter = -1);
-  void emitForeach(Emitter& e, ExpressionPtr val, ExpressionPtr key,
-      StatementPtr body, bool strong);
+  void emitForeach(Emitter& e, ForEachStatementPtr fe);
   void emitRestoreErrorReporting(Emitter& e, Id oldLevelLoc);
   void emitMakeUnitFatal(Emitter& e, const std::string& message);
 

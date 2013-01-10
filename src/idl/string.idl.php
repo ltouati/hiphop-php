@@ -170,8 +170,9 @@ DefineFunction(
     'desc'   => "Returns an ASCII string containing the binary representation of hexidecimal str.",
     'flags'  =>  HasDocComment,
     'return' => array(
-      'type'   => String,
-      'desc'   => "Returns the binary representation of the given hexidecimal string.",
+      'type'   => Variant,
+      'hint'   => String,
+      'desc'   => "Returns the binary representation of the given hexidecimal string or FALSE on failure.",
     ),
     'args'   => array(
       array(
@@ -2353,13 +2354,13 @@ DefineFunction(
     'desc'   => "Returns the length of the given string.",
     'flags'  =>  HasDocComment | FunctionIsFoldable,
     'return' => array(
-      'type'   => Int64,
+      'type'   => Variant,
       'desc'   => "The length of the string on success, and 0 if the string is empty.",
     ),
     'args'   => array(
       array(
         'name'   => "str",
-        'type'   => String,
+        'type'   => Variant,
         'desc'   => "The string being measured for length.",
       ),
     ),

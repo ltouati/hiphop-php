@@ -14,26 +14,29 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef _IR_H_
-#define _IR_H_
+#ifndef incl_HPHP_VM_IR_H_
+#define incl_HPHP_VM_IR_H_
 
-#include <boost/noncopyable.hpp>
 #include <algorithm>
-#include <boost/checked_delete.hpp>
-#include <stdarg.h>
-#include <stdint.h>
+#include <cstdarg>
+#include <cinttypes>
 #include <iostream>
 #include <vector>
 #include <stack>
 #include <list>
-#include <assert.h>
-#include "runtime/vm/translator/asm-x64.h"
+#include <cassert>
+#include <boost/noncopyable.hpp>
+#include <boost/checked_delete.hpp>
+#include "util/asm-x64.h"
+#include "util/arena.h"
+#include "runtime/ext/ext_continuation.h"
+#include "runtime/vm/translator/physreg.h"
+#include "runtime/vm/translator/abi-x64.h"
 #include "runtime/vm/translator/types.h"
 #include "runtime/vm/translator/runtime-type.h"
 #include "runtime/base/types.h"
 #include "runtime/vm/func.h"
 #include "runtime/vm/class.h"
-#include "util/arena.h"
 
 namespace HPHP {
 // forward declaration
@@ -41,8 +44,7 @@ class StringData;
 namespace VM {
 namespace JIT {
 
-using HPHP::VM::Transl::TCA;
-using HPHP::VM::Transl::register_name_t;
+using namespace HPHP::VM::Transl;
 
 class FailedIRGen : public std::exception {
  public:
@@ -60,240 +62,260 @@ static const TCA kIRDirectJmpInactive = NULL;
 static const TCA kIRDirectJccJmpActive = (TCA)0x01;
 // Optimize Jcc exit from trace when fall through path stays in trace
 static const TCA kIRDirectJccActive = (TCA)0x02;
+// Optimize guard exit from beginning of trace
+static const TCA kIRDirectGuardActive = (TCA)0x03;
 
 #define PUNT(instr) do {                             \
-  throw FailedIRGen(__FILE__, __LINE__, __func__);   \
-  } while(0)
+  throw FailedIRGen(__FILE__, __LINE__, #instr);     \
+} while(0)
+
 
 // XXX TODO: define another namespace for opcodes
 // TODO: Make sure the MayModRefs column is correct... (MayRaiseError too...)
-//
-// (A) Opcode Name
-//
-// (B) Has Dest: whether or not the instruction produces a result.
-//     This is sometimes the same value as their input, for example AddElem
-//     to array, which returns the array which it took as an input.
-//
-// (C) Can CSE: whether or not the instruction is safe to elide through
-//     common subexpression elimination.
-//
-// (D) Is Essential: whether or not the instruction is essential. Non-essential
-//     instructions may be eliminated by optimizations.
-//
-// (E) hasMemEffects: if true, then this instruction cannot be rolled
-//     back because it has side effects on memory. Use for setting
-//     lastExitSlowInvalid in trace builder.
-//
-// (F) isNativeHelper: This instruction calls out to a native helper.
-//     The register allocator uses this to optimize register spills
-//     around native calls and to bias register assignment for arguments
-//     and return values.
-//
-// (G) consumesRefCount: if true, then this instruction decrefs its
-//     sources. Some native helpers do this. When generating this
-//     instruction, we need to incref its source operands before
-//     passing them to this instruction.
-//
-// (H) producesRefCount: if true, then this instruction produces an
-//     incref'ed value. Some native helpers do this. We need to decref
-//     the value produces by this instruction after its last use.
-//
-// (I) MayModifyRefs: if true, this instruction may modify references/variants,
-//     either directly or indirectly by reentering the VM.
-//     This requires the JIT to be pessimistic about live references.
-//
-// (J) Is Rematerializable: if true, this instruction is rematerializable.
-//
-// (K) May Raise Error: whether this instruction has a helper than can raise an
-//     error (has an implicit exit edge)
-#define IR_OPCODES                         \
-  /* checks */                             \
-  OPC(GuardType,         1,  1,  1,  0,  0,  0,  0,  0,  0,  0)               \
-  OPC(GuardRefs,         0,  1,  1,  0,  0,  0,  0,  0,  0,  0)/* XXX validate */  \
-                                           \
-  /* arith ops (integer) */                \
-  OPC(OpAdd,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpSub,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpAnd,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpOr,              1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpXor,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpMul,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-                                           \
-  /* convert from src operand's type to destination type */ \
-  OPC(Conv,              1,  1,  0,  0,  1,  0,  0,  0,  0,  0) \
-                                           \
-  /* query operators returning bool */     \
-  /* comparisons (binary) */               \
-  OPC(OpGt,              1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpGte,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpLt,              1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpLte,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpEq,              1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpNeq,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  /* XXX validate that we don't call helpers with side effects */   \
-  /* and ref count consumption/production for any of these query */ \
-  /* operations and their corresponding conditional branches */     \
-  OPC(OpSame,            1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(OpNSame,           1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-                                                            \
-  /* XXX TODO check instanceof's hasEffects, isNative, RefCount, MayReenter */\
-  OPC(InstanceOfD,       1,  1,  0,  0,  0,  0,  0,  0,  0,  0)               \
-  OPC(NInstanceOfD,      1,  1,  0,  0,  0,  0,  0,  0,  0,  0)               \
-                                                            \
-  /* isset, empty, and istype queries (unary) */            \
-  OPC(IsSet,             1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(IsType,            1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(IsNSet,            1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(IsNType,           1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-                                                            \
-  /* conditional branches & jump */                         \
-  /* there is a conditional branch for each of the above query */        \
-  /* operators to enable generating efficieng comparison-and-branch */   \
-  /* instruction sequences */                               \
-  OPC(JmpGt,             1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpGte,            1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpLt,             1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpLte,            1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpEq,             1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpNeq,            1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpZero,           1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpNZero,          1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpSame,           1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpNSame,          1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-    /* keep preceeding conditional branches contiguous */       \
-  OPC(JmpInstanceOfD,    1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpNInstanceOfD,   1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpIsSet,          1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpIsType,         1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpIsNSet,         1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(JmpIsNType,        1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(Jmp_,              1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ExitWhenSurprised, 0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ExitOnVarEnv,      0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(CheckUninit,       0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-                                           \
-  OPC(Unbox,             1,  0,  0,  0,  0,  0,  1,  0,  0,  0) \
-  OPC(Box,               1,  0,  1,  1,  1,  1,  1,  0,  0,  0) \
-  OPC(UnboxPtr,          1,  0,  0,  0,  0,  0,  0,  0,  0,  0) \
-                                            \
-  /* loads */                               \
-  OPC(LdStack,           1,  0,  0,  0,  0,  0,  1,  0,  0,  0) \
-  OPC(LdLoc,             1,  0,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdStackAddr,       1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdLocAddr,         1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdMemNR,           1,  0,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdPropNR,          1,  0,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdRefNR,           1,  0,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdThis,            1,  1,  1,  0,  0,  0,  0,  0,  1,  0) \
-  /* LdThisNc avoids check */                               \
-  OPC(LdThisNc,          1,  1,  0,  0,  0,  0,  0,  0,  1,  0) \
-  OPC(LdVarEnv,          1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdRetAddr,         1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdHome,            1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdConst,           1,  1,  0,  0,  0,  0,  0,  0,  1,  0) \
-  OPC(DefConst,          1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdCls,             1,  1,  0,  0,  0,  0,  0,  1,  1,  1) \
-  /* XXX cg doesn't support the version without a label*/   \
-  OPC(LdClsCns,          1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdClsMethod,       1,  1,  0,  0,  0,  0,  0,  0,  1,  1) \
-  /* XXX TODO Create version of LdClsPropAddr that doesn't check */ \
-  OPC(LdPropAddr,        1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdClsPropAddr,     1,  1,  1,  0,  0,  0,  0,  0,  1,  1) \
-  /* helper call to MethodCache::Lookup */                  \
-  OPC(LdObjMethod,       1,  1,  1,  0,  1,  0,  0,  1,  0,  1) \
-  OPC(LdObjClass,        1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdCachedClass,     1,  1,  0,  0,  0,  0,  0,  0,  1,  0) \
-  /* helper call to FuncCache::lookup */                    \
-  OPC(LdFunc,            1,  0,  1,  0,  1,  1,  0,  0,  0,  1) \
-  /* helper call for FPushFuncD(FixedFuncCache::lookup) */  \
-  OPC(LdFixedFunc,       1,  1,  1,  0,  0,  0,  0,  0,  0,  1) \
-  OPC(LdCurFuncPtr,      1,  1,  0,  0,  0,  0,  0,  0,  1,  0) \
-  OPC(LdARFuncPtr,       1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(LdFuncCls,         1,  1,  0,  0,  0,  0,  0,  0,  0,  1) \
-  OPC(NewObj,            1,  0,  1,  1,  1,  0,  1,  0,  0,  0) \
-  OPC(LdRaw,             1,  0,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(AllocActRec,       1,  0,  0,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(FreeActRec,        1,  0,  0,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(Call,              1,  0,  1,  1,  0,  1,  0,  1,  0,  0) \
-  OPC(NativeImpl,        0,  0,  1,  1,  1,  0,  0,  1,  0,  0) \
-  /* return control to caller */                            \
-  OPC(RetCtrl,           0,  0,  1,  1,  0,  0,  0,  0,  0,  0) \
-  /* transfer return value from callee to caller; update sp */ \
-  OPC(RetVal,            1,  0,  0,  1,  0,  1,  0,  0,  0,  0) \
-  /* stores */                              \
-  OPC(StMem,             0,  0,  1,  1,  0,  1,  0,  1,  0,  0) \
-  OPC(StMemNT,           0,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(StProp,            0,  0,  1,  1,  0,  1,  0,  1,  0,  0) \
-  OPC(StPropNT,          0,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(StLoc,             0,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(StLocNT,           0,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(StRef,             1,  0,  1,  1,  0,  1,  0,  1,  0,  0) \
-  OPC(StRefNT,           1,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(StRaw,             0,  0,  1,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(SpillStack,        1,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(SpillStackAllocAR, 1,  0,  1,  1,  0,  1,  0,  0,  0,  0) \
-  /* Update ExitTrace entries in sync with ExitType below */    \
-  OPC(ExitTrace,         0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ExitTraceCc,       0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ExitSlow,          0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ExitSlowNoProgress,0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ExitGuardFailure,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  /* */                                                     \
-  OPC(Mov,               1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(IncRef,            1,  0,  0,  1,  0,  0,  1,  0,  0,  0) \
-  OPC(DecRefLoc,         0,  0,  1,  1,  0,  0,  0,  1,  0,  0) \
-  OPC(DecRefStack,       0,  0,  1,  1,  0,  0,  0,  1,  0,  0) \
-  OPC(DecRefThis,        0,  0,  1,  1,  0,  0,  0,  1,  0,  0) \
-  OPC(DecRefLocals,      0,  0,  1,  1,  1,  0,  0,  1,  0,  0) \
-  OPC(DecRefLocalsThis,  0,  0,  1,  1,  1,  0,  0,  1,  0,  0) \
-  OPC(DecRef,            0,  0,  1,  1,  0,  1,  0,  1,  0,  0) \
+
+/*
+ * Flags on opcodes.  See ir.specification for details on the meaning
+ * of these flags.
+ */
+enum OpcodeFlag : uint64_t {
+  HasDest          = 0x0001,
+  CanCSE           = 0x0002,
+  Essential        = 0x0004,
+  MemEffects       = 0x0008,
+  CallsNative      = 0x0010,
+  ConsumesRC       = 0x0020,
+  ProducesRC       = 0x0040,
+  MayModifyRefs    = 0x0080,
+  Rematerializable = 0x0100, // TODO: implies HasDest
+  MayRaiseError    = 0x0200, // TODO: should it imply CallsNative?
+};
+
+#define IR_OPCODES                                                      \
+  /* checks */                                                          \
+  OPC(GuardType,         (HasDest|CanCSE|Essential))                    \
+  OPC(GuardLoc,          (Essential))                                   \
+  OPC(GuardStk,          (Essential))                                   \
+  OPC(GuardRefs,         (CanCSE|Essential))                            \
+                                                                        \
+  /* arith ops (integer) */                                             \
+  OPC(OpAdd,             (HasDest|CanCSE))                              \
+  OPC(OpSub,             (HasDest|CanCSE))                              \
+  OPC(OpAnd,             (HasDest|CanCSE))                              \
+  OPC(OpOr,              (HasDest|CanCSE))                              \
+  OPC(OpXor,             (HasDest|CanCSE))                              \
+  OPC(OpMul,             (HasDest|CanCSE))                              \
+                                                                        \
+  /* convert from src operand's type to destination type */             \
+  OPC(Conv,              (HasDest|CanCSE|CallsNative))                  \
+                                                                        \
+  /* query operators returning bool */                                  \
+  /* comparisons (binary) */                                            \
+  OPC(OpGt,              (HasDest|CanCSE))                              \
+  OPC(OpGte,             (HasDest|CanCSE))                              \
+  OPC(OpLt,              (HasDest|CanCSE))                              \
+  OPC(OpLte,             (HasDest|CanCSE))                              \
+  OPC(OpEq,              (HasDest|CanCSE))                              \
+  OPC(OpNeq,             (HasDest|CanCSE))                              \
+  /* XXX validate that we don't call helpers with side effects */       \
+  /* and ref count consumption/production for any of these query */     \
+  /* operations and their corresponding conditional branches */         \
+  OPC(OpSame,            (HasDest|CanCSE|CallsNative))                  \
+  OPC(OpNSame,           (HasDest|CanCSE|CallsNative))                  \
+                                                                        \
+  /* XXX TODO check instanceof's hasEffects, isNative, RefCount, MayReenter */ \
+  OPC(InstanceOfD,       (HasDest|CanCSE))                              \
+  OPC(NInstanceOfD,      (HasDest|CanCSE))                              \
+                                                                        \
+  /* isset, empty, and istype queries (unary) */                        \
+  OPC(IsSet,             (HasDest|CanCSE))                              \
+  OPC(IsType,            (HasDest|CanCSE))                              \
+  OPC(IsNSet,            (HasDest|CanCSE))                              \
+  OPC(IsNType,           (HasDest|CanCSE))                              \
+                                                                        \
+  /* conditional branches & jump */                                     \
+  /* there is a conditional branch for each of the above query */       \
+  /* operators to enable generating efficieng comparison-and-branch */  \
+  /* instruction sequences */                                           \
+  OPC(JmpGt,             (HasDest|Essential))                           \
+  OPC(JmpGte,            (HasDest|Essential))                           \
+  OPC(JmpLt,             (HasDest|Essential))                           \
+  OPC(JmpLte,            (HasDest|Essential))                           \
+  OPC(JmpEq,             (HasDest|Essential))                           \
+  OPC(JmpNeq,            (HasDest|Essential))                           \
+  OPC(JmpZero,           (HasDest|Essential))                           \
+  OPC(JmpNZero,          (HasDest|Essential))                           \
+  OPC(JmpSame,           (HasDest|Essential))                           \
+  OPC(JmpNSame,          (HasDest|Essential))                           \
+    /* keep preceeding conditional branches contiguous */               \
+  OPC(JmpInstanceOfD,    (HasDest|Essential))                           \
+  OPC(JmpNInstanceOfD,   (HasDest|Essential))                           \
+  OPC(JmpIsSet,          (HasDest|Essential))                           \
+  OPC(JmpIsType,         (HasDest|Essential))                           \
+  OPC(JmpIsNSet,         (HasDest|Essential))                           \
+  OPC(JmpIsNType,        (HasDest|Essential))                           \
+  OPC(Jmp_,              (HasDest|Essential))                           \
+  OPC(ExitWhenSurprised, (Essential))                                   \
+  OPC(ExitOnVarEnv,      (Essential))                                   \
+  OPC(CheckUninit,       (Essential))                                   \
+                                                                        \
+  OPC(Unbox,             (HasDest|ProducesRC))                          \
+  OPC(Box,               (HasDest|Essential|MemEffects|                 \
+                          CallsNative|ConsumesRC|                       \
+                          ProducesRC))                                  \
+  OPC(UnboxPtr,          (HasDest))                                     \
+                                                                        \
+  /* loads */                                                           \
+  OPC(LdStack,           (HasDest|ProducesRC))                          \
+  OPC(LdLoc,             (HasDest))                                     \
+  OPC(LdStackAddr,       (HasDest|CanCSE))                              \
+  OPC(LdLocAddr,         (HasDest|CanCSE))                              \
+  OPC(LdMemNR,           (HasDest))                                     \
+  OPC(LdPropNR,          (HasDest))                                     \
+  OPC(LdRefNR,           (HasDest))                                     \
+  OPC(LdThis,            (HasDest|CanCSE|Essential|                     \
+                          Rematerializable))                            \
+  /* LdThisNc avoids check */                                           \
+  OPC(LdThisNc,          (HasDest|CanCSE|Rematerializable))             \
+  OPC(LdVarEnv,          (HasDest|CanCSE))                              \
+  OPC(LdRetAddr,         (HasDest))                                     \
+  OPC(LdHome,            (HasDest|CanCSE))                              \
+  OPC(LdConst,           (HasDest|CanCSE|Rematerializable))             \
+  OPC(DefConst,          (HasDest|CanCSE))                              \
+  OPC(LdCls,             (HasDest|CanCSE|MayModifyRefs|                 \
+                          Rematerializable|MayRaiseError))              \
+  /* XXX cg doesn't support the version without a label*/               \
+  OPC(LdClsCns,          (HasDest|CanCSE))                              \
+  OPC(LdClsMethodCache,  (HasDest|CanCSE|                               \
+                          Rematerializable|MayRaiseError))              \
+  OPC(LdClsMethod,       (HasDest|CanCSE))                              \
+  /* XXX TODO Create version of LdClsPropAddr that doesn't check */     \
+  OPC(LdPropAddr,        (HasDest|CanCSE))                              \
+  OPC(LdClsPropAddr,     (HasDest|CanCSE|Essential|                     \
+                          Rematerializable|MayRaiseError))              \
+  /* helper call to MethodCache::Lookup */                              \
+  OPC(LdObjMethod,       (HasDest|CanCSE|Essential|                     \
+                          CallsNative|MayModifyRefs|                    \
+                          MayRaiseError))                               \
+  OPC(LdObjClass,        (HasDest|CanCSE))                              \
+  OPC(LdCachedClass,     (HasDest|CanCSE|Rematerializable))             \
+  /* helper call to FuncCache::lookup */                                \
+  OPC(LdFunc,            (HasDest|Essential|CallsNative|                \
+                          ConsumesRC|MayRaiseError))                    \
+  /* helper call for FPushFuncD(FixedFuncCache::lookup) */              \
+  OPC(LdFixedFunc,       (HasDest|CanCSE|Essential|                     \
+                          MayRaiseError))                               \
+  OPC(LdCurFuncPtr,      (HasDest|CanCSE|Rematerializable))             \
+  OPC(LdARFuncPtr,       (HasDest|CanCSE))                              \
+  OPC(LdFuncCls,         (HasDest|CanCSE|Rematerializable))             \
+  OPC(NewObj,            (HasDest|Essential|MemEffects|                 \
+                          CallsNative|ProducesRC))                      \
+  OPC(NewArray,          (HasDest|Essential|MemEffects|                 \
+                          CallsNative|ProducesRC))                      \
+  OPC(NewTuple,          (HasDest|Essential|MemEffects|                 \
+                          CallsNative|ConsumesRC|ProducesRC))           \
+  OPC(LdRaw,             (HasDest))                                     \
+                          /* XXX: why does AllocActRec consume rc? */   \
+  OPC(AllocActRec,       (HasDest|MemEffects|ConsumesRC))               \
+  OPC(FreeActRec,        (HasDest|MemEffects))                          \
+  OPC(Call,              (HasDest|Essential|MemEffects|                 \
+                          ConsumesRC|MayModifyRefs))                    \
+  OPC(NativeImpl,        (Essential|MemEffects|CallsNative|             \
+                          MayModifyRefs))                               \
+  /* return control to caller */                                        \
+  OPC(RetCtrl,           (Essential|MemEffects))                        \
+  /* transfer return value from callee to caller; update sp */          \
+  OPC(RetVal,            (HasDest|MemEffects|ConsumesRC))               \
+  /* stores */                                                          \
+  OPC(StMem,             (Essential|MemEffects|ConsumesRC|              \
+                          MayModifyRefs))                               \
+  OPC(StMemNT,           (Essential|MemEffects|ConsumesRC))             \
+  OPC(StProp,            (Essential|MemEffects|ConsumesRC|              \
+                          MayModifyRefs))                               \
+  OPC(StPropNT,          (Essential|MemEffects|ConsumesRC))             \
+  OPC(StLoc,             (Essential|MemEffects|ConsumesRC))             \
+  OPC(StLocNT,           (Essential|MemEffects|ConsumesRC))             \
+  OPC(StRef,             (HasDest|Essential|MemEffects|                 \
+                          ConsumesRC|MayModifyRefs))                    \
+  OPC(StRefNT,           (HasDest|Essential|MemEffects|                 \
+                          ConsumesRC))                                  \
+  OPC(StRaw,             (Essential|MemEffects))                        \
+  OPC(SpillStack,        (HasDest|Essential|MemEffects|                 \
+                          ConsumesRC))                                  \
+  OPC(SpillStackAllocAR, (HasDest|Essential|MemEffects|                 \
+                          ConsumesRC))                                  \
+  /* Update ExitTrace entries in sync with ExitType below */            \
+  OPC(ExitTrace,         (Essential))                                   \
+  OPC(ExitTraceCc,       (Essential))                                   \
+  OPC(ExitSlow,          (Essential))                                   \
+  OPC(ExitSlowNoProgress,(Essential))                                   \
+  OPC(ExitGuardFailure,  (Essential))                                   \
+  /* */                                                                 \
+  OPC(Mov,               (HasDest|CanCSE))                              \
+  OPC(IncRef,            (HasDest|MemEffects|ProducesRC))               \
+  OPC(DecRefLoc,         (Essential|MemEffects|MayModifyRefs))          \
+  OPC(DecRefStack,       (Essential|MemEffects|MayModifyRefs))          \
+  OPC(DecRefThis,        (Essential|MemEffects|MayModifyRefs))          \
+  OPC(DecRefLocals,      (Essential|MemEffects|CallsNative|             \
+                          MayModifyRefs))                               \
+  OPC(DecRefLocalsThis,  (Essential|MemEffects|CallsNative|             \
+                          MayModifyRefs))                               \
+  OPC(DecRef,            (Essential|MemEffects|ConsumesRC|              \
+                          MayModifyRefs))                               \
   /* DecRefNZ only decrements the ref count, and doesn't modify Refs. */ \
-  /* DecRefNZ also doesn't run dtor, so we mark it as non-essential. */ \
-  OPC(DecRefNZ,          0,  0,  0,  1,  0,  1,  0,  0,  0,  0) \
-  OPC(DefLabel,          0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(Marker,            0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(DefFP,             1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(DefSP,             1,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-                                            \
-  /* runtime helpers */                     \
- /* XXX check consume ref count */ \
-  OPC(RaiseUninitWarning,0,  0,  1,  1,  1,  0,  0,  1,  0,  1) \
-  OPC(Print,             0,  0,  1,  1,  1,  1,  0,  0,  0,  0) \
-  OPC(AddElem,           1,  0,  0,  1,  1,  1,  1,  1,  0,  0) \
-  OPC(AddNewElem,        1,  0,  0,  1,  1,  1,  1,  0,  0,  0) \
-  OPC(DefCns,            1,  1,  1,  1,  1,  0,  0,  0,  0,  0) \
-  OPC(Concat,            1,  0,  0,  1,  1,  1,  1,  1,  0,  0) \
-  OPC(ArrayAdd,          1,  0,  0,  1,  1,  1,  1,  0,  0,  0) \
-  OPC(DefCls,            0,  1,  1,  0,  1,  0,  0,  0,  0,  0) \
-  OPC(DefFunc,           0,  1,  1,  0,  1,  0,  0,  0,  0,  0) \
-                                                        \
-  OPC(InterpOne,         1,  0,  1,  1,  1,  0,  0,  1,  0,  1) \
-  /* for register allocation */                         \
-  OPC(Spill,             1,  0,  0,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(Reload,            1,  0,  0,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(AllocSpill,        0,  0,  1,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(FreeSpill,         0,  0,  1,  1,  0,  0,  0,  0,  0,  0) \
-  /* continuation support */                                    \
-  OPC(LdContThisOrCls,   1,  1,  0,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(CreateCont,        1,  0,  1,  1,  1,  0,  1,  0,  0,  0) \
-  OPC(FillContLocals,    0,  0,  1,  1,  1,  0,  0,  0,  0,  0) \
-  OPC(FillContThis,      0,  0,  1,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(UnpackCont,        1,  0,  1,  1,  1,  0,  0,  0,  0,  0) \
-  OPC(ExitOnContVars,    0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(PackCont,          0,  0,  1,  1,  1,  0,  0,  0,  0,  0) \
-  OPC(ContRaiseCheck,    0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(ContPreNext,       0,  0,  1,  1,  0,  0,  0,  0,  0,  0) \
-  OPC(ContStartedCheck,  0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
-  OPC(AssertRefCount,    0,  0,  1,  0,  0,  0,  0,  0,  0,  0) \
+  /* DecRefNZ also doesn't run dtor, so we don't mark it essential. */  \
+  OPC(DecRefNZ,          (MemEffects|ConsumesRC))                       \
+  OPC(DefLabel,          (Essential))                                   \
+  OPC(Marker,            (Essential))                                   \
+  OPC(DefFP,             (HasDest|Essential))                           \
+  OPC(DefSP,             (HasDest|Essential))                           \
+                                                                        \
+  /* runtime helpers */                                                 \
+ /* XXX check consume ref count */                                      \
+  OPC(RaiseUninitWarning,(Essential|MemEffects|CallsNative|             \
+                          MayModifyRefs|MayRaiseError))                 \
+  OPC(Print,             (Essential|MemEffects|CallsNative|             \
+                          ConsumesRC))                                  \
+  OPC(AddElem,           (HasDest|MemEffects|CallsNative|               \
+                          ConsumesRC|ProducesRC|MayModifyRefs))         \
+  OPC(AddNewElem,        (HasDest|MemEffects|CallsNative|               \
+                          ConsumesRC|ProducesRC))                       \
+  OPC(DefCns,            (HasDest|CanCSE|Essential|                     \
+                          MemEffects|CallsNative))                      \
+  OPC(Concat,            (HasDest|MemEffects|CallsNative|               \
+                          ConsumesRC|ProducesRC|MayModifyRefs))         \
+  OPC(ArrayAdd,          (HasDest|MemEffects|CallsNative|               \
+                          ConsumesRC|ProducesRC))                       \
+                         /* XXX: shouldn't DefCls/DefFunc MayRaiseError? */ \
+  OPC(DefCls,            (CanCSE|Essential|CallsNative))                \
+  OPC(DefFunc,           (CanCSE|Essential|CallsNative))                \
+                                                                        \
+  OPC(InterpOne,         (HasDest|Essential|MemEffects|                 \
+                          CallsNative|MayModifyRefs|                    \
+                          MayRaiseError))                               \
+  /* for register allocation */                                         \
+  OPC(Spill,             (HasDest|MemEffects))                          \
+  OPC(Reload,            (HasDest|MemEffects))                          \
+  OPC(AllocSpill,        (Essential|MemEffects))                        \
+  OPC(FreeSpill,         (Essential|MemEffects))                        \
+  /* continuation support */                                            \
+  OPC(CreateCont,        (HasDest|Essential|MemEffects|                 \
+                          CallsNative|ProducesRC))                      \
+  OPC(FillContLocals,    (Essential|MemEffects|CallsNative))            \
+  OPC(FillContThis,      (Essential|MemEffects))                        \
+  OPC(UnlinkContVarEnv,  (Essential|MemEffects|CallsNative))            \
+  OPC(LinkContVarEnv,    (Essential|MemEffects|CallsNative))            \
+  OPC(ContRaiseCheck,    (Essential))                                   \
+  OPC(ContPreNext,       (Essential|MemEffects))                        \
+  OPC(ContStartedCheck,  (Essential))                                   \
+                                                                        \
+  OPC(IncStat,           (Essential|MemEffects))                        \
+  OPC(AssertRefCount,    (Essential))                                   \
+  /* */
 
 enum Opcode {
-#define OPC(name, hasDst, canCSE, essential, hasMemEffects, isNative, \
-            consumesRefCount, producesRefCount, mayModRefs, rematerializable, \
-            error) \
-  name,
+#define OPC(name, flags) name,
   IR_OPCODES
-  #undef OPC
-  /* */
+#undef OPC
   IR_NUM_OPCODES
 };
 
@@ -347,7 +369,8 @@ enum ExitType {
 extern TraceExitType::ExitType getExitType(Opcode opc);
 extern Opcode getExitOpcode(TraceExitType::ExitType);
 
-extern const char* OpcodeStrings[];
+const char* opcodeName(Opcode opcode);
+bool opcodeHasFlags(Opcode opcode, uint64_t flag);
 
 class Type {
 public:
@@ -359,10 +382,12 @@ public:
     IRT(Uninit,          "Unin")  \
     IRT(Null,            "Null")  \
     IRT(Bool,            "Bool")  \
-    IRT(Int,             "Int")   /* HPHP::DataType::KindOfInt64 */ \
+    IRT(Int,             "Int") /* HPHP::DataType::KindOfInt64 */      \
     IRT(Dbl,             "Dbl")   \
     IRT(Placeholder,     "ERROR") /* Nothing in VM types enum at this position */ \
     IRT(StaticStr,       "Sstr")  \
+    IRT(UncountedInit,   "UncountedInit") /* One of {Null,Bool,Int,Dbl,SStr} */\
+    IRT(Uncounted,       "Uncounted") /* 1 of: {Unin,Null,Bool,Int,Dbl,SStr} */\
     IRT(Str,             "Str")   \
     IRT(Arr,             "Arr")   \
     IRT(Obj,             "Obj")   \
@@ -398,6 +423,8 @@ public:
     TAG_ENUM_COUNT
   };
 
+  static const Tag RefCountThreshold = Uncounted;
+
   static inline bool isBoxed(Tag t) {
     return (t > Cell && t < Gen);
   }
@@ -407,45 +434,74 @@ public:
   }
 
   static inline bool isRefCounted(Tag t) {
-    return t >= Type::Str && t <= Type::Gen;
+    return (t > RefCountThreshold && t <= Gen);
   }
 
   static inline bool isStaticallyKnown(Tag t) {
-    return t != Type::Cell && t != Type::Gen && t != Type::None;
+    return (t != Cell       &&
+            t != Gen        &&
+            t != Uncounted  &&
+            t != UncountedInit);
   }
 
   static inline bool isStaticallyKnownUnboxed(Tag t) {
-    return isUnboxed(t) && t != Type::Cell;
+    return isStaticallyKnown(t) && isUnboxed(t);
   }
 
   static inline bool needsStaticBitCheck(Tag t) {
-    return (t == Type::Cell || t == Type::Gen ||
-            t == Type::Str  || t == Type::Arr);
+    return (t == Cell ||
+            t == Gen  ||
+            t == Str  ||
+            t == Arr);
   }
 
+  // returns true if definitely not uninitialized
   static inline bool isInit(Tag t) {
-    // returns true if definitely not uninitialized
-    return ((t > Type::Uninit && t < Type::Cell) || isBoxed(t));
+    return ((t != Uninit && isStaticallyKnown(t)) ||
+            isBoxed(t));
   }
+
+  static inline bool mayBeUninit(Tag t) {
+    return (t == Uninit    ||
+            t == Uncounted ||
+            t == Cell      ||
+            t == Gen);
+  }
+
   // returns true if t1 is a more refined that t2
   static inline bool isMoreRefined(Tag t1, Tag t2) {
-    return ((t2 == Gen && t1 < Gen) ||
-            (t2 == Cell && t1 < Cell) ||
-            (t2 == BoxedCell && t1 < BoxedCell && t1 > Cell) ||
-            (t2 == Str && t1 == StaticStr) ||
-            (t2 == BoxedStr && t1 == BoxedStaticStr));
+    return ((t2 == Gen           && t1 < Gen)                    ||
+            (t2 == Cell          && t1 < Cell)                   ||
+            (t2 == BoxedCell     && t1 < BoxedCell && t1 > Cell) ||
+            (t2 == Str           && t1 == StaticStr)             ||
+            (t2 == BoxedStr      && t1 == BoxedStaticStr)        ||
+            (t2 == Uncounted     && t1 < Uncounted)              ||
+            (t2 == UncountedInit && t1 < UncountedInit && t1 > Uninit));
   }
+
   static inline bool isString(Tag t) {
-    return t == Type::Str || t == Type::StaticStr;
+    return (t == Str || t == StaticStr);
   }
+
   static inline bool isNull(Tag t) {
-    return t == Type::Null || t == Type::Uninit;
+    return (t == Null || t == Uninit);
   }
+
   static inline Tag getInnerType(Tag t) {
-    if (!isBoxed(t)) {
-      return None;
+    ASSERT(isBoxed(t));
+    switch (t) {
+      case BoxedUninit    : return Uninit;
+      case BoxedNull      : return Null;
+      case BoxedBool      : return Bool;
+      case BoxedInt       : return Int;
+      case BoxedDbl       : return Dbl;
+      case BoxedStaticStr : return StaticStr;
+      case BoxedStr       : return Str;
+      case BoxedArr       : return Arr;
+      case BoxedObj       : return Obj;
+      case BoxedCell      : return Cell;
+      default             : not_reached();
     }
-    return (Tag)(t - BoxedUninit + Uninit);
   }
 
   static inline Tag getBoxedType(Tag t) {
@@ -458,7 +514,19 @@ public:
       return BoxedNull;
     }
     ASSERT(isUnboxed(t));
-    return (Tag)(BoxedUninit + (t - Uninit));
+    switch (t) {
+      case Uninit     : return BoxedUninit;
+      case Null       : return BoxedNull;
+      case Bool       : return BoxedBool;
+      case Int        : return BoxedInt;
+      case Dbl        : return BoxedDbl;
+      case StaticStr  : return BoxedStaticStr;
+      case Str        : return BoxedStr;
+      case Arr        : return BoxedArr;
+      case Obj        : return BoxedObj;
+      case Cell       : return BoxedCell;
+      default         : not_reached();
+    }
   }
 
   static inline Tag getValueType(Tag t) {
@@ -472,22 +540,47 @@ public:
 
   // translates a compiler Type::Type to a HPHP::DataType
   static inline DataType toDataType(Tag type) {
-    if (type == Type::ClassRef) {
-      return KindOfClass;
+    switch (type) {
+      case None          : return KindOfInvalid;
+      case Uninit        : return KindOfUninit;
+      case Null          : return KindOfNull;
+      case Bool          : return KindOfBoolean;
+      case Int           : return KindOfInt64;
+      case Dbl           : return KindOfDouble;
+      case StaticStr     : return KindOfStaticString;
+      case Str           : return KindOfString;
+      case Arr           : return KindOfArray;
+      case Obj           : return KindOfObject;
+      case ClassRef      : return KindOfClass;
+      case UncountedInit : return KindOfUncountedInit;
+      case Uncounted     : return KindOfUncounted;
+      case Gen           : return KindOfAny;
+      default: {
+        ASSERT(isBoxed(type));
+        return KindOfRef;
+      }
     }
-    if (isBoxed(type)) {
-      return KindOfRef;
-    }
-    ASSERT(type < Type::Cell);
-    return (DataType)(type - 1);
   }
 
   static inline Tag fromDataType(DataType outerType, DataType innerType) {
     switch (outerType) {
-      case KindOfClass   : return Type::ClassRef;
-      case KindOfRef     : return getBoxedType(fromDataType(innerType,
-                                                            KindOfInvalid));
-      default            : return (Tag)(outerType + 1);
+      case KindOfInvalid       : return None;
+      case KindOfUninit        : return Uninit;
+      case KindOfNull          : return Null;
+      case KindOfBoolean       : return Bool;
+      case KindOfInt64         : return Int;
+      case KindOfDouble        : return Dbl;
+      case KindOfStaticString  : return StaticStr;
+      case KindOfString        : return Str;
+      case KindOfArray         : return Arr;
+      case KindOfObject        : return Obj;
+      case KindOfClass         : return ClassRef;
+      case KindOfUncountedInit : return UncountedInit;
+      case KindOfUncounted     : return Uncounted;
+      case KindOfAny           : return Gen;
+      case KindOfRef           :
+        return getBoxedType(fromDataType(innerType, KindOfInvalid));
+      default                  : not_reached();
     }
   }
 
@@ -495,23 +588,89 @@ public:
     return fromDataType(rtt.outerType(), rtt.innerType());
   }
 
-  static inline bool canRunDtor(Type::Tag ty) {
-    return ty == Type::Obj || ty == Type::BoxedObj ||
-           ty == Type::Arr || ty == Type::BoxedArr ||
-           !Type::isStaticallyKnown(ty);
+  static inline bool canRunDtor(Type::Tag t) {
+    return (t == Obj       ||
+            t == BoxedObj  ||
+            t == Arr       ||
+            t == BoxedArr  ||
+            t == Cell      ||
+            t == BoxedCell ||
+            t == Gen);
   }
 }; // class Type
 
-// Must be arena-allocatable.  (Destructor is not called.)
-class Local {
-public:
-  Local(uint32 i) : m_id(i) {}
-  uint32 getId() {return m_id;}
-  void print(std::ostream& os) {
+class RawMemSlot {
+ public:
+
+  enum Kind {
+    ContLabel, ContDone, ContShouldThrow, ContRunning,
+    StrLen, FuncNumParams, FuncRefBitVec,
+    MaxKind
+  };
+
+  static RawMemSlot& Get(Kind k) {
+    switch (k) {
+      case ContLabel:       return GetContLabel();
+      case ContDone:        return GetContDone();
+      case ContShouldThrow: return GetContShouldThrow();
+      case ContRunning:     return GetContRunning();
+      case StrLen:          return GetStrLen();
+      case FuncNumParams:   return GetFuncNumParams();
+      case FuncRefBitVec:   return GetFuncRefBitVec();
+      default: not_reached();
+    }
+  }
+
+  int64 getOffset()   { return m_offset; }
+  int32 getSize()     { return m_size; }
+  Type::Tag getType() { return m_type; }
+
+ private:
+  RawMemSlot(int64 offset, int32 size, Type::Tag type)
+    : m_offset(offset), m_size(size), m_type(type) { }
+
+  static RawMemSlot& GetContLabel() {
+    static RawMemSlot m(CONTOFF(m_label), sz::qword, Type::Int);
+    return m;
+  }
+  static RawMemSlot& GetContDone() {
+    static RawMemSlot m(CONTOFF(m_done), sz::byte, Type::Bool);
+    return m;
+  }
+  static RawMemSlot& GetContShouldThrow() {
+    static RawMemSlot m(CONTOFF(m_should_throw), sz::byte, Type::Bool);
+    return m;
+  }
+  static RawMemSlot& GetContRunning() {
+    static RawMemSlot m(CONTOFF(m_running), sz::byte, Type::Bool);
+    return m;
+  }
+  static RawMemSlot& GetStrLen() {
+    static RawMemSlot m(StringData::sizeOffset(), sz::dword, Type::Int);
+    return m;
+  }
+  static RawMemSlot& GetFuncNumParams() {
+    static RawMemSlot m(Func::numParamsOff(), sz::qword, Type::Int);
+    return m;
+  }
+  static RawMemSlot& GetFuncRefBitVec() {
+    static RawMemSlot m(Func::refBitVecOff(), sz::qword, Type::Int);
+    return m;
+  }
+
+  int64 m_offset;
+  int32 m_size;
+  Type::Tag m_type;
+};
+
+struct Local {
+  explicit Local(uint32_t id) : m_id(id) {}
+  uint32_t getId() const { return m_id; }
+  void print(std::ostream& os) const {
     os << "h" << m_id;
   }
 private:
-  const uint32 m_id;
+  const uint32_t m_id;
 };
 
 class SSATmp;
@@ -548,8 +707,8 @@ public:
   void       setId(uint32 newId)       { m_id = newId; }
   void       setAsmAddr(void* addr)    { m_asmAddr = addr; }
   void*      getAsmAddr()              { return m_asmAddr; }
-  uint16     getLiveOutRegs() const    { return m_liveOutRegs; }
-  void       setLiveOutRegs(uint16 s)  { m_liveOutRegs = s; }
+  RegSet     getLiveOutRegs() const    { return m_liveOutRegs; }
+  void       setLiveOutRegs(RegSet s)  { m_liveOutRegs = s; }
   bool       isDefConst() const {
     return (m_op == DefConst || m_op == LdHome);
   }
@@ -566,55 +725,27 @@ public:
   virtual SSATmp* simplify(Simplifier*);
   virtual void print(std::ostream& ostream);
   void print();
-  virtual void genCode(CodeGenerator* cg);
+  void genCode(CodeGenerator* cg);
   virtual IRInstruction* clone(IRFactory* factory);
   typedef std::list<IRInstruction*> List;
   typedef std::list<IRInstruction*>::iterator Iterator;
   typedef std::list<IRInstruction*>::reverse_iterator ReverseIterator;
-  static  bool canCSE(Opcode opc);
-  virtual bool canCSE() const { return IRInstruction::canCSE(getOpcode()); }
-  static  bool hasDst(Opcode opc);
-  virtual bool hasDst() const { return IRInstruction::hasDst(getOpcode()); }
-  static  bool isRematerializable(Opcode opc);
-  virtual bool isRematerializable() const {
-    return IRInstruction::isRematerializable(getOpcode());
-  }
-  static  bool hasMemEffects(Opcode opc);
-  virtual bool hasMemEffects() const {
-    return IRInstruction::hasMemEffects(getOpcode());
-  }
-  static  bool isNative(Opcode opc);
-  virtual bool isNative()  const {
-    return IRInstruction::isNative(getOpcode());
-  }
-  static  bool consumesReferences(Opcode opc);
-  virtual bool consumesReferences() const {
-    return IRInstruction::consumesReferences(getOpcode());
-  }
+
+  /*
+   * Helper accessors for the OpcodeFlag bits for this instruction.
+   *
+   * Note that these wrappers may have additional logic beyond just
+   * checking the corresponding flags bit.
+   */
+  bool canCSE() const;
+  bool hasDst() const;
+  bool hasMemEffects() const;
+  bool isRematerializable() const;
+  bool isNative() const;
+  bool consumesReferences() const;
   bool consumesReference(int srcNo) const;
-  static  bool producesReference(Opcode opc);
-  virtual bool producesReference()  const {
-    return IRInstruction::producesReference(getOpcode());
-  }
-  static  bool mayModifyRefs(Opcode opc);
-  virtual bool mayModifyRefs()  const {
-    Opcode opc = getOpcode();
-    // DecRefNZ does not have side effects other than decrementing the ref
-    // count. Therefore, its MayModifyRefs should be false.
-    if (opc == DecRef) {
-      if (this->isControlFlowInstruction() || Type::isString(m_type)) {
-        // If the decref has a target label, then it exits if the destructor
-        // has to be called, so it does not have any side effects on the main
-        // trace.
-        return false;
-      }
-      if (Type::isBoxed(m_type)) {
-        Type::Tag innerType = Type::getInnerType(m_type);
-        return (innerType == Type::Obj || innerType == Type::Arr);
-      }
-    }
-    return IRInstruction::mayModifyRefs(opc);
-  }
+  bool producesReference() const;
+  bool mayModifyRefs() const;
 
   void printDst(std::ostream& ostream);
   void printSrc(std::ostream& ostream, uint32 srcIndex);
@@ -625,12 +756,11 @@ protected:
   friend class IRFactory;
   friend class TraceBuilder;
   friend class HhbcTranslator;
-  friend class MemMap;
 
  public:
   IRInstruction(Opcode o, Type::Tag t, LabelInstruction *l = NULL)
       : m_op(o), m_type(t), m_id(0), m_numSrcs(0),
-        m_liveOutRegs(0), m_dst(NULL), m_asmAddr(NULL), m_label(l),
+        m_dst(NULL), m_asmAddr(NULL), m_label(l),
         m_parent(NULL), m_tca(NULL)
   {
     m_srcs[0] = m_srcs[1] = NULL;
@@ -638,7 +768,7 @@ protected:
 
   IRInstruction(Opcode o, Type::Tag t, SSATmp* src, LabelInstruction *l = NULL)
       : m_op(o), m_type(t), m_id(0),  m_numSrcs(1),
-        m_liveOutRegs(0), m_dst(NULL), m_asmAddr(NULL), m_label(l),
+        m_dst(NULL), m_asmAddr(NULL), m_label(l),
         m_parent(NULL), m_tca(NULL)
   {
     m_srcs[0] = src; m_srcs[1] = NULL;
@@ -650,7 +780,7 @@ protected:
                 SSATmp* src1,
                 LabelInstruction *l = NULL)
       : m_op(o), m_type(t), m_id(0), m_numSrcs(2),
-        m_liveOutRegs(0), m_dst(NULL), m_asmAddr(NULL), m_label(l),
+        m_dst(NULL), m_asmAddr(NULL), m_label(l),
         m_parent(NULL), m_tca(NULL)
   {
     m_srcs[0] = src0; m_srcs[1] = src1;
@@ -661,7 +791,6 @@ protected:
         m_type(inst->m_type),
         m_id(0),
         m_numSrcs(inst->m_numSrcs),
-        m_liveOutRegs(0),
         m_dst(NULL),
         m_asmAddr(NULL),
         m_label(inst->m_label),
@@ -679,7 +808,7 @@ protected:
   Type::Tag         m_type;
   uint32            m_id;
   uint16            m_numSrcs;
-  uint16            m_liveOutRegs;
+  RegSet            m_liveOutRegs;
   SSATmp*           m_srcs[NUM_FIXED_SRCS];
   SSATmp*           m_dst;
   void*             m_asmAddr;
@@ -692,7 +821,6 @@ class ExtendedInstruction : public IRInstruction {
 public:
   virtual SSATmp* simplify(Simplifier*);
   virtual IRInstruction* clone(IRFactory* factory);
-  virtual void genCode(CodeGenerator* cg);
 
   virtual SSATmp* getExtendedSrc(uint32 i) const;
   virtual void    setExtendedSrc(uint32 i, SSATmp* newSrc);
@@ -769,7 +897,6 @@ class TypeInstruction : public IRInstruction {
 public:
   Type::Tag   getSrcType() { return m_srcType; }
   virtual void print(std::ostream& ostream);
-  virtual void genCode(CodeGenerator* cg);
   virtual bool equals(IRInstruction* inst) const;
   virtual uint32 hash();
   virtual SSATmp* simplify(Simplifier*);
@@ -790,64 +917,64 @@ protected:
 
 class ConstInstruction : public IRInstruction {
 public:
-  bool getValAsBool() {
+  bool getValAsBool() const {
     ASSERT(m_type == Type::Bool);
     return m_boolVal;
   }
-  int64 getValAsInt() {
+  int64 getValAsInt() const {
     ASSERT(m_type == Type::Int);
     return m_intVal;
   }
-  int64 getValAsRawInt() {
+  int64 getValAsRawInt() const {
     return m_intVal;
   }
-  double getValAsDbl() {
+  double getValAsDbl() const {
     ASSERT(m_type == Type::Dbl);
     return m_dblVal;
   }
-  const StringData* getValAsStr() {
+  const StringData* getValAsStr() const {
     ASSERT(m_type == Type::StaticStr);
     return m_strVal;
   }
-  const ArrayData* getValAsArr() {
+  const ArrayData* getValAsArr() const {
     ASSERT(m_type == Type::Arr);
     return m_arrVal;
   }
-  const Func* getValAsFunc() {
+  const Func* getValAsFunc() const {
     ASSERT(m_type == Type::FuncRef);
     return m_func;
   }
-  const Class* getValAsClass() {
+  const Class* getValAsClass() const {
     ASSERT(m_type == Type::ClassRef);
     return m_clss;
   }
-  const VarEnv* getValAsVarEnv() {
+  const VarEnv* getValAsVarEnv() const {
     ASSERT(m_type == Type::VarEnvRef);
     return m_varEnv;
   }
-  const TCA getValAsTCA() {
+  TCA getValAsTCA() const {
     ASSERT(m_type == Type::TCA);
     return m_tca;
   }
-  const bool isEmptyArray() {
+  bool isEmptyArray() const {
     return m_arrVal == HphpArray::GetStaticEmptyArray();
   }
-  Local* getLocal() {
+  Local getLocal() const {
     ASSERT(m_type == Type::Home);
     return m_local;
   }
-  uintptr_t getValAsBits() { return m_bits; }
+  uintptr_t getValAsBits() const { return m_bits; }
 
-  void printConst(std::ostream& ostream);
+  void printConst(std::ostream& ostream) const;
   virtual bool isConstInstruction() const {return true;}
   virtual void print(std::ostream& ostream);
-  virtual void genCode(CodeGenerator* cg);
   virtual bool equals(IRInstruction* inst) const;
   virtual uint32 hash();
   virtual IRInstruction* clone(IRFactory* factory);
  protected:
   friend class IRFactory;
   friend class TraceBuilder;
+  friend class LinearScan;
   ConstInstruction(Opcode opc, Type::Tag type, int64 val) :
       IRInstruction(opc, type) {
     ASSERT(opc == DefConst || opc == LdConst);
@@ -881,9 +1008,9 @@ public:
     m_intVal = 0;
     m_boolVal = val;
   }
-  ConstInstruction(SSATmp* src, Local* l)
+  ConstInstruction(SSATmp* src, Local l)
       : IRInstruction(LdHome, Type::Home, src) {
-    m_local = l;
+    new (&m_local) Local(l);
   }
   ConstInstruction(Opcode opc, const Func* f)
       : IRInstruction(opc, Type::FuncRef) {
@@ -906,7 +1033,7 @@ private:
     double            m_dblVal;
     const StringData* m_strVal;
     const ArrayData*  m_arrVal;
-    Local*            m_local; // for LdHome opcode
+    Local             m_local; // for LdHome opcode
     const Func*       m_func;
     const Class*      m_clss;
     const VarEnv*     m_varEnv;
@@ -926,7 +1053,6 @@ public:
   int32       getStackOff() const { return m_stackOff; }
   const Func* getFunc() const     { return m_func; }
 
-  virtual void genCode(CodeGenerator* cg);
   virtual void print(std::ostream& ostream);
   virtual bool equals(IRInstruction* inst) const;
   virtual uint32 hash();
@@ -979,10 +1105,38 @@ protected:
   };
 };
 
+struct SpillInfo {
+  enum Type { MMX, Memory };
+
+  explicit SpillInfo(RegNumber r) : m_type(MMX), m_val(int(r)) {}
+  explicit SpillInfo(uint32_t v)  : m_type(Memory), m_val(v) {}
+
+  Type      type() const { return m_type; }
+  RegNumber mmx()  const { return RegNumber(m_val); }
+  uint32_t  mem()  const { return m_val; }
+
+private:
+  Type     m_type : 1;
+  uint32_t m_val : 31;
+};
+
+inline std::ostream& operator<<(std::ostream& os, SpillInfo si) {
+  switch (si.type()) {
+  case SpillInfo::MMX:
+    os << "mmx" << reg::regname(RegXMM(int(si.mmx())));
+    break;
+  case SpillInfo::Memory:
+    os << "spill[" << si.mem() << "]";
+    break;
+  }
+  return os;
+}
+
 class SSATmp {
 public:
   uint32            getId() const { return m_id; }
   IRInstruction*    getInstruction() const { return m_inst; }
+  void              setInstruction(IRInstruction* i) { m_inst = i; }
   Type::Tag         getType() const { return m_inst->getType(); }
   uint32            getLastUseId() { return m_lastUseId; }
   void              setLastUseId(uint32 newId) { m_lastUseId = newId; }
@@ -990,76 +1144,127 @@ public:
   void              setUseCount(uint32 count) { m_useCount = count; }
   void              incUseCount() { m_useCount++; }
   uint32            decUseCount() { return --m_useCount; }
-  int32             getAnalysisValue() { return m_analysis; }
-  void              setAnalysisValue(int val) { m_analysis = val; }
-  uint32            getNumAssignedLocs() const;
-  bool              isAssignedReg(uint32 index) const;
-  bool              isAssignedMmxReg(uint32 index) const;
-  bool              isAssignedSpillLoc(uint32 index) const;
-  register_name_t   getAssignedLoc() { return m_assignedLoc[0]; }
-  register_name_t   getAssignedLoc(uint32 index);
-  void              setAssignedLoc(register_name_t loc, uint32 index) {
-    m_assignedLoc[index] = loc;
-  }
-  uint32            getSpillLoc(uint32 index) const;
-  void              setSpillLoc(uint32 spillLoc, uint32 index);
-  register_name_t   getMmxReg(uint32 index) const;
-  void              setMmxReg(register_name_t mmxReg, uint32 index);
   bool              isConst() const { return m_inst->isConstInstruction(); }
-  bool              getConstValAsBool();
-  int64             getConstValAsInt();
-  int64             getConstValAsRawInt();
-  double            getConstValAsDbl();
-  const StringData* getConstValAsStr();
-  const ArrayData*  getConstValAsArr();
-  const Func*       getConstValAsFunc();
-  const Class*      getConstValAsClass();
-  const Local*      getConstValAsLocal();
-  uintptr_t         getConstValAsBits();
+  bool              getConstValAsBool() const;
+  int64             getConstValAsInt() const;
+  int64             getConstValAsRawInt() const;
+  double            getConstValAsDbl() const;
+  const StringData* getConstValAsStr() const;
+  const ArrayData*  getConstValAsArr() const;
+  const Func*       getConstValAsFunc() const;
+  const Class*      getConstValAsClass() const;
+  uintptr_t         getConstValAsBits() const;
   void              print(std::ostream& ostream, bool printLastUse = false);
   void              print();
-  static const uint32 MaxNumAssignedLoc = 2;
 
   // Used for Jcc to Jmp elimination
   void              setTCA(TCA tca);
-  TCA               getTCA();
+  TCA               getTCA() const;
+
+  /*
+   * Returns whether or not a given register index is allocated to a
+   * register, or returns false if it is spilled.
+   *
+   * Right now, we only spill both at the same time and only Spill and
+   * Reload instructions need to deal with SSATmps that are spilled.
+   */
+  bool              hasReg(uint32 i) const { return !m_isSpilled &&
+                                                m_regs[i] != reg::noreg; }
+
+  /*
+   * The maximum number of registers this SSATmp may need allocated.
+   * This is based on the type of the temporary (some types never have
+   * regs, some have two, etc).
+   */
+  int               numNeededRegs() const;
+
+  /*
+   * The number of regs actually allocated to this SSATmp.  This might
+   * end up fewer than numNeededRegs if the SSATmp isn't really
+   * being used.
+   */
+  int               numAllocatedRegs() const;
+
+  /*
+   * Access to allocated registers.
+   *
+   * Returns InvalidReg for slots that aren't allocated.
+   */
+  PhysReg     getReg() { ASSERT(!m_isSpilled); return m_regs[0]; }
+  PhysReg     getReg(uint32 i) { ASSERT(!m_isSpilled); return m_regs[i]; }
+  void        setReg(PhysReg reg, uint32 i) { m_regs[i] = reg; }
+
+  /*
+   * Returns information about how to spill/fill a SSATmp.
+   *
+   * These functions are only valid if this SSATmp is being spilled or
+   * filled.  In all normal instructions (i.e. other than Spill and
+   * Reload), SSATmps are assigned registers instead of spill
+   * locations.
+   */
+  void        setSpillInfo(int idx, SpillInfo si) { m_spillInfo[idx] = si;
+                                                    m_isSpilled = true; }
+  SpillInfo   getSpillInfo(int idx) const { ASSERT(m_isSpilled);
+                                            return m_spillInfo[idx]; }
+
+  /*
+   * During register allocation, this is used to track spill locations
+   * that are assigned to specific SSATmps.  A value of -1 is used to
+   * indicate no spill slot has been assigned.
+   *
+   * After register allocation, use getSpillInfo to access information
+   * about where we've decided to spill/fill a given SSATmp from.
+   * This value doesn't have any meaning outside of the linearscan
+   * pass.
+   */
+  int32_t           getSpillSlot() const { return m_spillSlot; }
+  void              setSpillSlot(int32_t val) { m_spillSlot = val; }
 
 private:
   friend class IRFactory;
   friend class TraceBuilder;
-  friend class LinearScan;
 
   // May only be created via IRFactory.  Note that this class is never
   // destructed, so don't add complex members.
-  SSATmp(uint32 opndId, IRInstruction* i) : m_inst(i),
-                                            m_id(opndId),
-                                            m_lastUseId(0),
-                                            m_useCount(0) {
-    m_assignedLoc[0] = m_assignedLoc[1] = Transl::reg::noreg;
-    m_analysis = -1;
+  SSATmp(uint32 opndId, IRInstruction* i)
+    : m_inst(i)
+    , m_id(opndId)
+    , m_lastUseId(0)
+    , m_useCount(0)
+    , m_isSpilled(false)
+    , m_spillSlot(-1)
+  {
+    m_regs[0] = m_regs[1] = InvalidReg;
   }
+  SSATmp(const SSATmp&);
+  SSATmp& operator=(const SSATmp&);
 
   IRInstruction*  m_inst;
   const uint32    m_id;
   uint32          m_lastUseId;
   uint16          m_useCount;
-  // m_analysis is a scratch field that various analysis & optimization
-  // passes (e.g., the register allocator) can use
-  // for register spilling:
-  //   -1: not spilled
-  //   otherwise: spilled slot
-  int32           m_analysis;
-  // assignedLoc[0] is always the value of this tmp and for
-  // Cell or Gen types, assignedLoc[1] is the runtime type
-  // loc < LinearScan::NumRegs: general purpose registers
-  // LinearScan::NumRegs <= loc < LinearScan::FirstSpill: MMX registers
-  // LinearScan::FistSpill <= loc: spill location
-  register_name_t   m_assignedLoc[MaxNumAssignedLoc]; // register allocation
+  bool            m_isSpilled : 1;
+  int32_t         m_spillSlot : 31;
+
+  /*
+   * m_regs[0] is always the value of this SSATmp.
+   *
+   * Cell or Gen types use two registers: m_regs[1] is the runtime
+   * type.
+   */
+  static const int kMaxNumRegs = 2;
+  union {
+    PhysReg m_regs[kMaxNumRegs];
+    SpillInfo m_spillInfo[kMaxNumRegs];
+  };
 };
 
 class IRFactory {
 public:
-  IRFactory() : m_nextLabelId(0), m_nextOpndId(0) {}
+  IRFactory()
+    : m_nextLabelId(0)
+    , m_nextOpndId(0)
+  {}
 
   IRInstruction* cloneInstruction(IRInstruction* inst);
   ExtendedInstruction* cloneInstruction(ExtendedInstruction* inst);
@@ -1135,34 +1340,20 @@ public:
   IRInstruction* allocSpill(SSATmp* numSlots);
   IRInstruction* freeSpill(SSATmp* numSlots);
 
-  Local* getLocal(uint32 id) {
-    if (id >= m_locals.size()) {
-      m_locals.resize(id+1);
-    }
-    Local* opnd = m_locals[id];
-    if (opnd == NULL) {
-      m_locals[id] = opnd = new (m_arena) Local(id);
-    }
-    return opnd;
-  }
-
   SSATmp* getSSATmp(IRInstruction* inst) {
     SSATmp* tmp = new (m_arena) SSATmp(m_nextOpndId++, inst);
     inst->setDst(tmp);
     return tmp;
   }
 
-  uint32 getNumLocals() { return m_locals.size(); }
   uint32 getNumSSATmps() { return m_nextOpndId; }
-
   Arena& arena() { return m_arena; }
 
 private:
   uint32 m_nextLabelId;
   uint32 m_nextOpndId;
-  std::vector<Local*> m_locals;
 
-  // SSATmp, IRInstruction, and Local objects are allocated here.
+  // SSATmp and IRInstruction objects are allocated here.
   Arena m_arena;
 };
 
@@ -1237,7 +1428,6 @@ private:
 };
 
 void optimizeTrace(Trace*, IRFactory* irFactory);
-void eliminateDeadCode(Trace*);
 void numberInstructions(Trace*);
 uint32 numberInstructions(Trace* trace,
                           uint32 nextId,

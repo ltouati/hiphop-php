@@ -22,6 +22,7 @@
 
 #include <system/lib/systemlib.h>
 #include <util/logger.h>
+
 namespace HPHP {
 IMPLEMENT_DEFAULT_EXTENSION(SimpleXML);
 ///////////////////////////////////////////////////////////////////////////////
@@ -437,7 +438,8 @@ Variant c_SimpleXMLElement::t_asxml(CStrRef filename /* = "" */) {
   xmlNodeDumpOutput(outbuf, m_node->doc, m_node, 0, 0,
                     (char*)m_node->doc->encoding);
   xmlOutputBufferFlush(outbuf);
-  String ret((char *)outbuf->buffer->content, outbuf->buffer->use, CopyString);
+  String ret((char *)xmlOutputBufferGetContent(outbuf),
+                     xmlOutputBufferGetSize(outbuf), CopyString);
   xmlOutputBufferClose(outbuf);
   return ret;
 }

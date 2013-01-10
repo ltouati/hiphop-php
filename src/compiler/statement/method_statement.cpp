@@ -444,7 +444,7 @@ public:
           LabelStatementRawPtr label_stmt(
             static_pointer_cast<LabelStatement>(s));
           LabelInfo &li = labelMap[label_stmt->label()];
-          assert(!li.trys.size());
+          always_assert(!li.trys.size());
           li.trys = trys;
         }
         break;
@@ -655,7 +655,6 @@ void MethodStatement::analyzeProgram(AnalysisResultPtr ar) {
         funcScope, BlockScope::UseKindClosure);
     }
     if (funcScope->isSepExtension() ||
-        BuiltinSymbols::IsDeclaredDynamic(m_name) ||
         Option::IsDynamicFunction(m_method, m_name) || Option::AllDynamic) {
       funcScope->setDynamic();
     }
@@ -1227,7 +1226,7 @@ void MethodStatement::outputCPPStmt(CodeGenerator &cg, AnalysisResultPtr ar) {
             // an interface
             continue;
           }
-          assert(!parent.empty());
+          always_assert(!parent.empty());
           if (seenOther) {
             ClassScopePtr pcls = ar->findClass(parent);
             if (pcls) {
@@ -1355,7 +1354,7 @@ void MethodStatement::outputCPPTypeCheckWrapper(CodeGenerator &cg,
     cg_printf("num_args, ");
   }
 
-  assert(m_params);
+  always_assert(m_params);
 
   for (int i = 0; i < m_params->getCount(); i++) {
     ParameterExpressionPtr param =
@@ -1716,7 +1715,7 @@ void MethodStatement::outputJavaFFIStub(CodeGenerator &cg,
   }
 
   if (cg.getContext() == CodeGenerator::JavaFFIInterface
-   || inClass && m_modifiers->isAbstract()) {
+   || (inClass && m_modifiers->isAbstract())) {
     // skip all the abstract methods, because php overriding is not very
     // compatible with Java
     return;
@@ -1728,7 +1727,7 @@ void MethodStatement::outputJavaFFIStub(CodeGenerator &cg,
   // argument as a 64-bit integer, and then calls the native version.
   bool exposeNative = false;
   int ac = funcScope->getMaxParamCount();
-  if (ac > 0 || varArgs || !isStatic || !ret && inClass
+  if (ac > 0 || varArgs || !isStatic || (!ret && inClass)
    || cg.getContext() == CodeGenerator::JavaFFIInterface) {
     // make methods always return something, so that they can override
     // each other
@@ -1820,7 +1819,7 @@ void MethodStatement::outputJavaFFICPPStub(CodeGenerator &cg,
   bool isStatic = !inClass || m_modifiers->isStatic();
   string fname = funcScope->getId();
   int ac = funcScope->getMaxParamCount();
-  bool exposeNative = !(ac > 0 || varArgs || !isStatic || !ret && inClass);
+  bool exposeNative = !(ac > 0 || varArgs || !isStatic || (!ret && inClass));
 
   if (inClass && m_modifiers->isAbstract()) {
     // skip all the abstract methods, because hphp doesn't generate code

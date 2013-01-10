@@ -197,18 +197,25 @@ static void destructObject(RefData *p)  { ((ObjectData *)p)->release(); }
 HOT_FUNC
 static void destructRef(RefData *p)     { p->release(); }
 
-static void (*destructors[4])(RefData *) =
-  {destructString, destructArray, destructObject, destructRef};
+static_assert(TYPE_TO_DESTR_IDX(KindOfString) == 0, "String destruct index");
+static_assert(TYPE_TO_DESTR_IDX(KindOfArray)  == 1,  "Array destruct index");
+static_assert(TYPE_TO_DESTR_IDX(KindOfObject) == 2, "Object destruct index");
+static_assert(TYPE_TO_DESTR_IDX(KindOfRef)    == 3,    "Ref destruct index");
+
+static_assert(kDestrTableSize == 4,
+              "size of g_destructors[] must be kDestrTableSize");
+
+void (*g_destructors[kDestrTableSize])(RefData *) = { destructString,
+                                                      destructArray,
+                                                      destructObject,
+                                                      destructRef };
 
 inline ALWAYS_INLINE void Variant::destructDataImpl(RefData* data, DataType t) {
   ASSERT(IS_REFCOUNTED_TYPE(t));
   ASSERT(IS_REAL_TYPE(t));
-  CT_ASSERT(KindOfString + 1 == KindOfArray &&
-            KindOfArray + 1 == KindOfObject &&
-            KindOfObject + 1 == KindOfRef);
   if (data->decRefCount() == 0) {
     ASSERT(t >= KindOfString && t <= KindOfRef);
-    destructors[t - KindOfString](data);
+    g_destructors[typeToDestrIndex(t)](data);
   }
 }
 
@@ -216,34 +223,11 @@ inline ALWAYS_INLINE void Variant::destructImpl() {
   destructDataImpl(m_data.pref, m_type);
 }
 
-namespace VM {
-
-HOT_FUNC_VM
-void
-tv_release_generic(TypedValue* tv) {
-  ASSERT(VM::Transl::tx64->stateIsDirty());
-  ASSERT(tv->m_type >= KindOfString && tv->m_type <= KindOfRef);
-  destructors[tv->m_type - KindOfString](tv->m_data.pref);
-}
-
-HOT_FUNC_VM
-void
-tv_release_typed(RefData* pv, DataType dt) {
-  ASSERT(VM::Transl::tx64->stateIsDirty());
-  ASSERT(dt >= KindOfString && dt <= KindOfRef);
-  destructors[dt - KindOfString](pv);
-}
-
-}
-
 HOT_FUNC_VM
 void tvDecRefHelper(DataType type, uint64_t datum) {
   ASSERT(type >= KindOfString && type <= KindOfRef);
-  CT_ASSERT(KindOfString + 1 == KindOfArray &&
-            KindOfArray + 1 == KindOfObject &&
-            KindOfObject + 1 == KindOfRef);
   if (((RefData*)datum)->decRefCount() == 0) {
-    destructors[type - KindOfString]((RefData*)datum);
+    g_destructors[typeToDestrIndex(type)]((RefData*)datum);
   }
 }
 
@@ -3541,7 +3525,7 @@ void Variant::setEvalScalar() const {
     StringData *pstr = m_data.pstr;
     if (!pstr->isStatic()) {
       StringData *sd = StringData::GetStaticString(pstr);
-      if (pstr->decRefCount() == 0) pstr->release();
+      decRefStr(pstr);
       m_data.pstr = sd;
       ASSERT(m_data.pstr->isStatic());
       m_type = KindOfStaticString;
@@ -3552,7 +3536,7 @@ void Variant::setEvalScalar() const {
     ArrayData *parr = m_data.parr;
     if (!parr->isStatic()) {
       ArrayData *ad = ArrayData::GetScalarArray(parr);
-      if (parr->decRefCount() == 0) parr->release();
+      decRefArr(parr);
       m_data.parr = ad;
       ASSERT(m_data.parr->isStatic());
     }
@@ -3980,31 +3964,6 @@ SharedVariant *Variant::getSharedVariant() const {
     return m_data.parr->getSharedVariant();
   }
   return NULL;
-}
-
-const char *Variant::getTypeString(DataType type) {
-  switch (type) {
-  case KindOfUninit:
-  case KindOfNull:    return "KindOfNull";
-  case KindOfBoolean: return "KindOfBoolean";
-  case KindOfInt64:   return "KindOfInt64";
-  case KindOfDouble:  return "KindOfDouble";
-  case KindOfStaticString:  return "KindOfStaticString";
-  case KindOfString:  return "KindOfString";
-  case KindOfArray:   return "KindOfArray";
-  case KindOfObject:  return "KindOfObject";
-  case KindOfRef: return "KindOfRef";
-  default:
-    ASSERT(false);
-    break;
-  }
-  return "";
-}
-
-std::string Variant::getDebugDump() const {
-  char buf[1024];
-  snprintf(buf, sizeof(buf), "[%s: %p]", getTypeString(m_type), m_data.pstr);
-  return buf;
 }
 
 void Variant::dump() const {

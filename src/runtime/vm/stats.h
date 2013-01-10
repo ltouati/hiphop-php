@@ -17,7 +17,7 @@
 #define _STATS_H_
 
 #include <runtime/vm/hhbc.h>
-#include <runtime/vm/translator/asm-x64.h>
+#include <util/asm-x64.h>
 #include <util/trace.h>
 
 namespace HPHP {
@@ -69,12 +69,14 @@ extern __thread uint64_t tl_tcInstrs;
   STAT(TgtCache_StaticMethodFHit) \
   STAT(TgtCache_StaticMethodFMiss) \
   STAT(TgtCache_StaticMethodFBypass) \
+  STAT(TgtCache_StaticMethodFFill) \
   STAT(TgtCache_ClassExistsHit) \
   STAT(TgtCache_ClassExistsMiss) \
   STAT(Tx64_FusedTypeCheck) \
   STAT(Tx64_UnfusedTypeCheck) \
   STAT(Tx64_VerifyParamTypeSlow) \
   STAT(Tx64_VerifyParamTypeFast) \
+  STAT(Tx64_VerifyParamTypeBit) \
   STAT(Tx64_VerifyParamTypeSlowShortcut) \
   STAT(Tx64_VerifyParamTypePass) \
   STAT(Tx64_VerifyParamTypeEqual) \
@@ -83,6 +85,7 @@ extern __thread uint64_t tl_tcInstrs;
   STAT(Tx64_InstanceOfDInterface) \
   STAT(Tx64_InstanceOfDSlow) \
   STAT(Tx64_InstanceOfDFast) \
+  STAT(Tx64_InstanceOfDBit) \
   STAT(Tx64_InstanceOfDEqual) \
   STAT(Tx64_InstanceOfDFinalTrue) \
   STAT(Tx64_InstanceOfDFinalFalse) \
@@ -115,6 +118,20 @@ extern __thread uint64_t tl_tcInstrs;
   STAT(Tx64_OneGuardLong) \
   STAT(Tx64_SideExit) \
   STAT(Tx64_SideExitClean) \
+  STAT(Tx64_NewInstancePropCheck) \
+  STAT(Tx64_NewInstancePropInit) \
+  STAT(Tx64_NewInstanceSPropCheck) \
+  STAT(Tx64_NewInstanceSPropInit) \
+  STAT(Tx64_NewInstanceNoCtorFast) \
+  STAT(Tx64_NewInstanceNoCtor) \
+  STAT(Tx64_NewInstanceFast) \
+  STAT(Tx64_NewInstanceGeneric) \
+  STAT(Tx64_StringSwitchSlow) \
+  STAT(Tx64_StringSwitchFast) \
+  STAT(Tx64_StringSwitchHit) \
+  STAT(Tx64_StringSwitchChain) \
+  STAT(Tx64_StringSwitchFailFast) \
+  STAT(Tx64_StringSwitchFailSlow) \
   /* Type prediction stats */ \
   STAT(TypePred_Insert) \
   STAT(TypePred_Evict) \
@@ -148,29 +165,35 @@ extern __thread uint64_t tl_tcInstrs;
   STAT(TraceletGuard_enter) \
   STAT(TraceletGuard_branch) \
   STAT(TraceletGuard_execute) \
-    STAT(UnitMerge_hoistable) \
-    STAT(UnitMerge_hoistable_persistent) \
-    STAT(UnitMerge_hoistable_persistent_cache) \
-    STAT(UnitMerge_hoistable_persistent_parent) \
-    STAT(UnitMerge_hoistable_persistent_parent_cache) \
-    STAT(UnitMerge_mergeable) \
-    STAT(UnitMerge_mergeable_unique) \
-    STAT(UnitMerge_mergeable_unique_persistent) \
-    STAT(UnitMerge_mergeable_unique_persistent_cache) \
-    STAT(UnitMerge_mergeable_define) \
-    STAT(UnitMerge_mergeable_global) \
-    STAT(UnitMerge_mergeable_class) \
-    STAT(UnitMerge_mergeable_require) \
-    STAT(UnitMerge_redo_hoistable) \
-  STAT(ElemAsm_GetIHit) \
-  STAT(ElemAsm_GetIMiss) \
+  /* Unit merging stats */ \
+  STAT(UnitMerge_hoistable) \
+  STAT(UnitMerge_hoistable_persistent) \
+  STAT(UnitMerge_hoistable_persistent_cache) \
+  STAT(UnitMerge_hoistable_persistent_parent) \
+  STAT(UnitMerge_hoistable_persistent_parent_cache) \
+  STAT(UnitMerge_mergeable) \
+  STAT(UnitMerge_mergeable_unique) \
+  STAT(UnitMerge_mergeable_unique_persistent) \
+  STAT(UnitMerge_mergeable_unique_persistent_cache) \
+  STAT(UnitMerge_mergeable_define) \
+  STAT(UnitMerge_mergeable_global) \
+  STAT(UnitMerge_mergeable_class) \
+  STAT(UnitMerge_mergeable_require) \
+  STAT(UnitMerge_redo_hoistable) \
+  /* property getter stats */ \
   STAT(PropAsm_Generic) \
   STAT(PropAsm_Specialized) \
   STAT(PropAsm_GenFinal) \
   /* astubs stats */ \
   STAT(Astubs_New) \
-  STAT(Astubs_Reused)
-
+  STAT(Astubs_Reused) \
+  /* HphpArray */ \
+  STAT(HA_FindIntFast) \
+  STAT(HA_FindIntSlow) \
+  /* Switches */ \
+  STAT(Switch_Generic) \
+  STAT(Switch_Integer) \
+  STAT(Switch_String) \
 
 enum StatCounter {
 #define STAT(name) \
@@ -181,6 +204,7 @@ enum StatCounter {
 };
 #undef O
 
+extern const char* g_counterNames[kNumStatCounters];
 extern __thread uint64_t tl_counters[kNumStatCounters];
 
 extern __thread uint64_t tl_helper_counters[];
@@ -195,7 +219,7 @@ static inline bool enableInstrCount() {
 }
 
 static inline void inc(StatCounter stat, int n = 1) {
-  if (Trace::moduleEnabled(Trace::stats, 1)) {
+  if (enabled()) {
     tl_counters[stat] += n;
   }
 }
@@ -212,6 +236,16 @@ static inline void incOp(Opcode opc) {
 static inline StatCounter opcodeToTranslStatCounter(Opcode opc) {
   ASSERT(OpLowInvalid == 0);
   return StatCounter(Instr_TranslLowInvalid + STATS_PER_OPCODE * opc);
+}
+
+static inline StatCounter opcodeToIRPreStatCounter(Opcode opc) {
+  ASSERT(OpLowInvalid == 0);
+  return StatCounter(Instr_TranslIRPreLowInvalid + STATS_PER_OPCODE * opc);
+}
+
+static inline StatCounter opcodeToIRPostStatCounter(Opcode opc) {
+  ASSERT(OpLowInvalid == 0);
+  return StatCounter(Instr_TranslIRPostLowInvalid + STATS_PER_OPCODE * opc);
 }
 
 // Both emitIncs use r10.

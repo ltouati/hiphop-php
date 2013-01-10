@@ -18,14 +18,15 @@
 #include <util/util.h>
 #include <util/job_queue.h>
 #include <util/parser/hphp.tab.hpp>
-#include <runtime/base/tv_macros.h>
 #include <runtime/vm/bytecode.h>
-#include <runtime/vm/peephole.h>
 #include <runtime/vm/repo.h>
 #include <runtime/vm/as.h>
+#include <runtime/vm/stats.h>
 #include <runtime/base/runtime_option.h>
 #include <runtime/base/zend/zend_string.h>
 #include <runtime/base/type_conversions.h>
+#include <runtime/base/builtin_functions.h>
+#include <runtime/base/variable_serializer.h>
 #include <runtime/eval/runtime/file_repository.h>
 
 #include <compiler/builtin_symbols.h>
@@ -33,6 +34,7 @@
 #include <compiler/analysis/emitter.h>
 #include <compiler/analysis/file_scope.h>
 #include <compiler/analysis/function_scope.h>
+#include <compiler/analysis/peephole.h>
 
 #include <compiler/expression/array_element_expression.h>
 #include <compiler/expression/array_pair_expression.h>
@@ -274,6 +276,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define COUNT_ONE(t) 1
 #define COUNT_TWO(t1,t2) 2
 #define COUNT_THREE(t1,t2,t3) 3
+#define COUNT_FOUR(t1,t2,t3,t4) 4
 #define COUNT_LMANY() 0
 #define COUNT_C_LMANY() 0
 #define COUNT_V_LMANY() 0
@@ -286,9 +289,12 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
   DEC_##t1 a1, DEC_##t2 a2
 #define THREE(t1, t2, t3) \
   DEC_##t1 a1, DEC_##t2 a2, DEC_##t3 a3
+#define FOUR(t1, t2, t3, t4) \
+  DEC_##t1 a1, DEC_##t2 a2, DEC_##t3 a3, DEC_##t4 a4
 #define NA
 #define DEC_MA std::vector<uchar>
 #define DEC_BLA std::vector<Label*>&
+#define DEC_SLA std::vector<StrOff>&
 #define DEC_IVA int32
 #define DEC_HA int32
 #define DEC_IA int32
@@ -309,6 +315,11 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
   POP_##t1(0);                \
   POP_##t2(1);                \
   POP_##t3(2)
+#define POP_FOUR(t1, t2, t3, t4) \
+  POP_##t1(0);                   \
+  POP_##t2(1);                   \
+  POP_##t3(2);                   \
+  POP_##t4(3)
 #define POP_LMANY() \
   getEmitterVisitor().popEvalStackLMany()
 #define POP_C_LMANY() \
@@ -332,16 +343,22 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define POP_HA_ONE(t) \
   POP_HA_##t(nIn)
 #define POP_HA_TWO(t1, t2) \
-  POP_HA_##t1(nIn)     \
+  POP_HA_##t1(nIn);    \
   POP_HA_##t2(nIn)
 #define POP_HA_THREE(t1, t2, t3) \
-  POP_HA_##t1(nIn)           \
-  POP_HA_##t2(nIn)           \
+  POP_HA_##t1(nIn);          \
+  POP_HA_##t2(nIn);          \
   POP_HA_##t3(nIn)
+#define POP_HA_FOUR(t1, t2, t3, t4) \
+  POP_HA_##t1(nIn);             \
+  POP_HA_##t2(nIn);             \
+  POP_HA_##t3(nIn);             \
+  POP_HA_##t4(nIn)
 
 #define POP_HA_NA
 #define POP_HA_MA(i)
 #define POP_HA_BLA(i)
+#define POP_HA_SLA(i)
 #define POP_HA_IVA(i)
 #define POP_HA_IA(i)
 #define POP_HA_I64A(i)
@@ -361,6 +378,11 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
   PUSH_##t2; \
   PUSH_##t1
 #define PUSH_THREE(t1, t2, t3) \
+  PUSH_##t3; \
+  PUSH_##t2; \
+  PUSH_##t1
+#define PUSH_FOUR(t1, t2, t3, t4) \
+  PUSH_##t4; \
   PUSH_##t3; \
   PUSH_##t2; \
   PUSH_##t1
@@ -391,6 +413,11 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
   IMPL1_##t1; \
   IMPL2_##t2; \
   IMPL3_##t3
+#define IMPL_FOUR(t1, t2, t3, t4) \
+  IMPL1_##t1; \
+  IMPL2_##t2; \
+  IMPL3_##t3; \
+  IMPL4_##t4
 
 #define IMPL_MA(var) do {                             \
   getUnitEmitter().emitInt32(var.size());             \
@@ -402,6 +429,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define IMPL1_MA IMPL_MA(a1)
 #define IMPL2_MA IMPL_MA(a2)
 #define IMPL3_MA IMPL_MA(a3)
+#define IMPL4_MA IMPL_MA(a4)
 
 #define IMPL_BLA(var) do {                            \
   getUnitEmitter().emitInt32(var.size());             \
@@ -412,6 +440,19 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define IMPL1_BLA IMPL_BLA(a1)
 #define IMPL2_BLA IMPL_BLA(a2)
 #define IMPL3_BLA IMPL_BLA(a3)
+#define IMPL4_BLA IMPL_BLA(a4)
+
+#define IMPL_SLA(var) do {                      \
+  auto& ue = getUnitEmitter();                  \
+  ue.emitInt32(var.size());                     \
+  for (auto& i : var) {                         \
+    ue.emitInt32(i.str);                        \
+    IMPL_BA(*i.dest);                           \
+  }                                             \
+} while (0)
+#define IMPL1_SLA IMPL_SLA(a1)
+#define IMPL2_SLA IMPL_SLA(a2)
+#define IMPL3_SLA IMPL_SLA(a3)
 
 #define IMPL_IVA(var) do { \
   getUnitEmitter().emitIVA(var); \
@@ -419,36 +460,43 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define IMPL1_IVA IMPL_IVA(a1)
 #define IMPL2_IVA IMPL_IVA(a2)
 #define IMPL3_IVA IMPL_IVA(a3)
+#define IMPL4_IVA IMPL_IVA(a4)
 
 #define IMPL1_HA IMPL_IVA(a1)
 #define IMPL2_HA IMPL_IVA(a2)
 #define IMPL3_HA IMPL_IVA(a3)
+#define IMPL4_HA IMPL_IVA(a4)
 
 #define IMPL1_IA IMPL_IVA(a1)
 #define IMPL2_IA IMPL_IVA(a2)
 #define IMPL3_IA IMPL_IVA(a3)
+#define IMPL4_IA IMPL_IVA(a4)
 
 #define IMPL_I64A(var) getUnitEmitter().emitInt64(var)
 #define IMPL1_I64A IMPL_I64A(a1)
 #define IMPL2_I64A IMPL_I64A(a2)
 #define IMPL3_I64A IMPL_I64A(a3)
+#define IMPL4_I64A IMPL_I64A(a4)
 
 #define IMPL_SA(var) \
   getUnitEmitter().emitInt32(getUnitEmitter().mergeLitstr(var))
 #define IMPL1_SA IMPL_SA(a1)
 #define IMPL2_SA IMPL_SA(a2)
 #define IMPL3_SA IMPL_SA(a3)
+#define IMPL4_SA IMPL_SA(a4)
 
 #define IMPL_AA(var) \
   getUnitEmitter().emitInt32(getUnitEmitter().mergeArray(var))
 #define IMPL1_AA IMPL_AA(a1)
 #define IMPL2_AA IMPL_AA(a2)
 #define IMPL3_AA IMPL_AA(a3)
+#define IMPL4_AA IMPL_AA(a4)
 
 #define IMPL_DA(var) getUnitEmitter().emitDouble(var)
 #define IMPL1_DA IMPL_DA(a1)
 #define IMPL2_DA IMPL_DA(a2)
 #define IMPL3_DA IMPL_DA(a3)
+#define IMPL4_DA IMPL_DA(a4)
 
 #define IMPL_BA(var) \
   if ((var).getAbsoluteOffset() == InvalidAbsoluteOffset) { \
@@ -465,16 +513,19 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define IMPL1_BA IMPL_BA(a1)
 #define IMPL2_BA IMPL_BA(a2)
 #define IMPL3_BA IMPL_BA(a3)
+#define IMPL4_BA IMPL_BA(a4)
 
 #define IMPL_OA(var) getUnitEmitter().emitByte(var)
 #define IMPL1_OA IMPL_OA(a1)
 #define IMPL2_OA IMPL_OA(a2)
 #define IMPL3_OA IMPL_OA(a3)
+#define IMPL4_OA IMPL_OA(a4)
  OPCODES
 #undef O
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef NA
 #undef DEC_MA
 #undef DEC_IVA
@@ -490,6 +541,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef POP_ONE
 #undef POP_TWO
 #undef POP_THREE
+#undef POP_FOUR
 #undef POP_LMANY
 #undef POP_C_LMANY
 #undef POP_V_LMANY
@@ -505,6 +557,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef POP_HA_ONE
 #undef POP_HA_TWO
 #undef POP_HA_THREE
+#undef POP_HA_FOUR
 #undef POP_HA_NA
 #undef POP_HA_MA
 #undef POP_HA_IVA
@@ -520,6 +573,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef PUSH_ONE
 #undef PUSH_TWO
 #undef PUSH_THREE
+#undef PUSH_FOUR
 #undef PUSH_CV
 #undef PUSH_VV
 #undef PUSH_HV
@@ -529,49 +583,66 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef IMPL_ONE
 #undef IMPL_TWO
 #undef IMPL_THREE
+#undef IMPL_FOUR
 #undef IMPL_NA
 #undef IMPL_MA
 #undef IMPL1_MA
 #undef IMPL2_MA
 #undef IMPL3_MA
+#undef IMPL4_MA
 #undef IMPL_BLA
 #undef IMPL1_BLA
 #undef IMPL2_BLA
 #undef IMPL3_BLA
+#undef IMPL4_BLA
+#undef IMPL_SLA
+#undef IMPL1_SLA
+#undef IMPL2_SLA
+#undef IMPL3_SLA
+#undef IMPL4_SLA
 #undef IMPL_IVA
 #undef IMPL1_IVA
 #undef IMPL2_IVA
 #undef IMPL3_IVA
+#undef IMPL4_IVA
 #undef IMPL1_HA
 #undef IMPL2_HA
 #undef IMPL3_HA
+#undef IMPL4_HA
 #undef IMPL1_IA
 #undef IMPL2_IA
 #undef IMPL3_IA
+#undef IMPL4_IA
 #undef IMPL_I64A
 #undef IMPL1_I64A
 #undef IMPL2_I64A
 #undef IMPL3_I64A
+#undef IMPL4_I64A
 #undef IMPL_DA
 #undef IMPL1_DA
 #undef IMPL2_DA
 #undef IMPL3_DA
+#undef IMPL4_DA
 #undef IMPL_SA
 #undef IMPL1_SA
 #undef IMPL2_SA
 #undef IMPL3_SA
+#undef IMPL4_SA
 #undef IMPL_AA
 #undef IMPL1_AA
 #undef IMPL2_AA
 #undef IMPL3_AA
+#undef IMPL4_AA
 #undef IMPL_BA
 #undef IMPL1_BA
 #undef IMPL2_BA
 #undef IMPL3_BA
+#undef IMPL4_BA
 #undef IMPL_OA
 #undef IMPL1_OA
 #undef IMPL2_OA
 #undef IMPL3_OA
+#undef IMPL4_OA
 
 static void checkJmpTargetEvalStack(const SymbolicStack& source,
                                     const SymbolicStack& dest) {
@@ -1439,9 +1510,11 @@ void EmitterVisitor::visitIfCondition(
       if (localLabel.isUsed()) {
         localLabel.set(e);
       }
-      ExpressionPtr rhs = binOpNode->getExp2();
-      Emitter rhsEmitter(rhs, m_ue, *this);
-      visitIfCondition(rhs, rhsEmitter, tru, fals, truFallthrough);
+      if (currentPositionIsReachable()) {
+        ExpressionPtr rhs = binOpNode->getExp2();
+        Emitter rhsEmitter(rhs, m_ue, *this);
+        visitIfCondition(rhs, rhsEmitter, tru, fals, truFallthrough);
+      }
       return;
     }
   }
@@ -1456,6 +1529,16 @@ void EmitterVisitor::visitIfCondition(
       visitIfCondition(val, valEmitter, fals, tru, !truFallthrough);
       return;
     }
+  }
+
+  Variant val;
+  if (cond->getScalarValue(val)) {
+    if (truFallthrough) {
+      if (!val.toBoolean()) e.Jmp(fals);
+    } else {
+      if (val.toBoolean()) e.Jmp(tru);
+    }
+    return;
   }
 
   visit(cond);
@@ -1544,7 +1627,7 @@ void EmitterVisitor::visit(FileScopePtr file) {
         case Statement::KindOfReturnStatement:
           if (mainReturn.m_type != KindOfInvalid) break;
           if (notMergeOnly) {
-            TV_WRITE_UNINIT(&mainReturn);
+            tvWriteUninit(&mainReturn);
             m_ue.returnSeen();
             goto fail;
           } else {
@@ -1552,7 +1635,7 @@ void EmitterVisitor::visit(FileScopePtr file) {
             Variant v(Variant::nullInit);
             if (r->getRetExp() &&
                 !r->getRetExp()->getScalarValue(v)) {
-              TV_WRITE_UNINIT(&mainReturn);
+              tvWriteUninit(&mainReturn);
               goto fail;
             }
             if (v.isString()) {
@@ -1631,7 +1714,7 @@ void EmitterVisitor::visit(FileScopePtr file) {
       }
     }
     if (mainReturn.m_type == KindOfInvalid) {
-      TV_WRITE_UNINIT(&mainReturn);
+      tvWriteUninit(&mainReturn);
       tvAsVariant(&mainReturn) = 1;
     }
     // Use _count as a flag for VMExecutionContext::evalUnit
@@ -1720,7 +1803,8 @@ static DataType getPredictedDataType(ExpressionPtr expr) {
   return act->getDataType();
 }
 
-void EmitterVisitor::fixReturnType(Emitter& e, FunctionCallPtr fn) {
+void EmitterVisitor::fixReturnType(Emitter& e, FunctionCallPtr fn,
+                                   bool isBuiltinCall) {
   int ref = -1;
   if (fn->hasAnyContext(Expression::RefValue |
                         Expression::DeepReference |
@@ -1763,7 +1847,20 @@ void EmitterVisitor::fixReturnType(Emitter& e, FunctionCallPtr fn) {
   } else if (!ref) {
     DataType dt = getPredictedDataType(fn);
     if (dt != KindOfUnknown) {
-      m_evalStack.setKnownType(dt, true /* predicted */);
+      if (isBuiltinCall) {
+        switch (dt) {
+          case KindOfBoolean:
+          case KindOfInt64:
+          case KindOfDouble: /* inferred */
+                             m_evalStack.setKnownType(dt, false);
+                             break;
+          default:           /* predicted */
+                             m_evalStack.setKnownType(dt, true);
+                             break;
+        }
+      } else {
+        m_evalStack.setKnownType(dt, true /* predicted */);
+      }
     }
     m_evalStack.setNotRef();
   }
@@ -1906,14 +2003,18 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           visit(node->getNthKid(DoStatement::BodyStmt));
         }
         condition.set(e);
-        visit(node->getNthKid(DoStatement::CondExpr));
-        emitConvertToCell(e);
-        e.JmpNZ(top);
+        {
+          ExpressionPtr c(static_pointer_cast<Expression>(
+                            node->getNthKid(DoStatement::CondExpr)));
+          Emitter condEmitter(c, m_ue, *this);
+          visitIfCondition(c, condEmitter, top, exit, false);
+        }
+
         if (brkHand.isUsed() || cntHand.isUsed()) {
           e.Jmp(exit);
           emitBreakHandler(e, exit, condition, brkHand, cntHand);
         }
-        exit.set(e);
+        if (exit.isUsed()) exit.set(e);
         return false;
       }
 
@@ -1966,9 +2067,13 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         Label fail;
         Label brkHand;
         Label cntHand;
-        if (visit(node->getNthKid(ForStatement::CondExpr))) {
-          emitConvertToCell(e);
-          e.JmpZ(fail);
+        if (ConstructPtr n = node->getNthKid(ForStatement::CondExpr)) {
+          Label tru;
+          Emitter condEmitter(static_pointer_cast<Expression>(n),
+                              m_ue, *this);
+          visitIfCondition(static_pointer_cast<Expression>(n),
+                           condEmitter, tru, fail, true);
+          if (tru.isUsed()) tru.set(e);
         }
         {
           CONTROL_BODY(fail, preInc, brkHand, cntHand);
@@ -1980,25 +2085,13 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         }
         e.Jmp(preCond);
         emitBreakHandler(e, fail, preInc, brkHand, cntHand);
-        fail.set(e);
+        if (fail.isUsed()) fail.set(e);
         return false;
       }
 
       case Statement::KindOfForEachStatement: {
         ForEachStatementPtr fe(static_pointer_cast<ForEachStatement>(node));
-        visit(node->getNthKid(ForEachStatement::ArrayExpr));
-        if (fe->isStrong()) {
-          emitConvertToVar(e);
-        } else {
-          emitConvertToCell(e);
-        }
-        ExpressionPtr val(static_pointer_cast<Expression>(
-                            node->getNthKid(ForEachStatement::ValueExpr)));
-        ExpressionPtr name(static_pointer_cast<Expression>(
-                             node->getNthKid(ForEachStatement::NameExpr)));
-        StatementPtr body(static_pointer_cast<Statement>(
-                            node->getNthKid(ForEachStatement::BodyStmt)));
-        emitForeach(e, val, name, body, fe->isStrong());
+        emitForeach(e, fe);
         return false;
       }
 
@@ -2099,6 +2192,12 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           m_metaInfo.add(m_ue.bcPos(), Unit::MetaInfo::GuardedThis,
                       false, 0, 0);
         }
+
+        for (auto& l : r->nonRefcountedLocals()) {
+          auto v = m_curFunc->lookupVarId(StringData::GetStaticString(l));
+          m_metaInfo.add(m_ue.bcPos(), Unit::MetaInfo::NonRefCounted,
+                         false, 0, v);
+        }
         if (retV) {
           e.RetV();
         } else {
@@ -2184,14 +2283,38 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         bool enabled = RuntimeOption::EnableEmitSwitch;
         SimpleFunctionCallPtr
           call(dynamic_pointer_cast<SimpleFunctionCall>(subject));
-        if (enabled && call &&
-            call->isCompilerCallToFunction("hphp_unpack_continuation")) {
+        bool isGenerator = call &&
+          call->isCompilerCallToFunction("hphp_unpack_continuation");
+        if (enabled && isGenerator) {
           emitContinuationSwitch(e, sw);
           return false;
         }
-        bool didIntSwitch =
-          enabled && emitIntegerSwitch(e, sw, caseLabels, done);
-        if (!didIntSwitch) {
+
+        SwitchState state;
+        bool didSwitch = false;
+        if (enabled) {
+          DataType stype = analyzeSwitch(sw, state);
+          if (stype != KindOfInvalid) {
+            e.incStat(stype == KindOfInt64 ? Stats::Switch_Integer
+                                           : Stats::Switch_String,
+                      1);
+            if (state.cases.empty()) {
+              // If there are no non-default cases, evaluate the subject for
+              // side effects and fall through. If there's a default case it
+              // will be emitted immediately after this.
+              visit(sw->getExp());
+              emitPop(e);
+            } else if (stype == KindOfInt64) {
+              emitIntegerSwitch(e, sw, caseLabels, done, state);
+            } else {
+              ASSERT(IS_STRING_TYPE(stype));
+              emitStringSwitch(e, sw, caseLabels, done, state);
+            }
+            didSwitch = true;
+          }
+        }
+        if (!didSwitch) {
+          e.incStat(Stats::Switch_Generic, 1);
           if (!simpleSubject) {
             // Evaluate the subject once and stash it in a local
             tempLocal = m_curFunc->allocUnnamedLocal();
@@ -2206,18 +2329,19 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           int defI = -1;
           for (uint i = 0; i < ncase; i++) {
             CaseStatementPtr c(static_pointer_cast<CaseStatement>((*cases)[i]));
-            if (c->getCondition()) {
+            ExpressionPtr condition = c->getCondition();
+            if (condition) {
               if (simpleSubject) {
                 // Evaluate the subject every time.
                 visit(subject);
                 emitConvertToCellOrLoc(e);
-                visit(c->getCondition());
+                visit(condition);
                 emitConvertToCell(e);
                 emitConvertSecondToCell(e);
               } else {
                 emitVirtualLocal(tempLocal);
                 emitCGet(e);
-                visit(c->getCondition());
+                visit(condition);
                 emitConvertToCell(e);
               }
               e.Eq();
@@ -2244,7 +2368,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           emitBreakHandler(e, done, done, brkHand, cntHand);
         }
         done.set(e);
-        if (!didIntSwitch && !simpleSubject) {
+        if (!didSwitch && !simpleSubject) {
           // Null out temp local, to invoke any needed refcounting
           ASSERT(tempLocal >= 0);
           ASSERT(start != InvalidAbsoluteOffset);
@@ -2338,16 +2462,21 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         Label fail;
         Label brkHand;
         Label cntHand;
-        visit(node->getNthKid(WhileStatement::CondExpr));
-        emitConvertToCell(e);
-        e.JmpZ(fail);
+        {
+          Label tru;
+          ExpressionPtr c(static_pointer_cast<Expression>(
+                            node->getNthKid(WhileStatement::CondExpr)));
+          Emitter condEmitter(c, m_ue, *this);
+          visitIfCondition(c, condEmitter, tru, fail, true);
+          if (tru.isUsed()) tru.set(e);
+        }
         {
           CONTROL_BODY(fail, preCond, brkHand, cntHand);
           visit(node->getNthKid(WhileStatement::BodyStmt));
         }
         e.Jmp(preCond);
         emitBreakHandler(e, fail, preCond, brkHand, cntHand);
-        fail.set(e);
+        if (fail.isUsed()) fail.set(e);
         return false;
       }
 
@@ -2445,7 +2574,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           int tuple_cap;
           if (u->isScalar()) {
             TypedValue tv;
-            TV_WRITE_UNINIT(&tv);
+            tvWriteUninit(&tv);
             initScalar(tv, u);
             if (m_staticArrays.size() == 0) {
               e.Array(tv.m_data.parr);
@@ -2644,10 +2773,14 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           Label tru, fls, done;
           visitIfCondition(b, e, tru, fls, false);
           if (fls.isUsed()) fls.set(e);
-          e.False();
-          e.Jmp(done);
-          tru.set(e);
-          e.True();
+          if (currentPositionIsReachable()) {
+            e.False();
+            e.Jmp(done);
+          }
+          if (tru.isUsed()) tru.set(e);
+          if (currentPositionIsReachable()) {
+            e.True();
+          }
           done.set(e);
           return true;
         }
@@ -2693,6 +2826,65 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
             visit(b->getExp2());
             emitConvertToCell(e);
             e.InstanceOf();
+          }
+          return true;
+        }
+
+        if (op == T_COLLECTION) {
+          ScalarExpressionPtr cls =
+            static_pointer_cast<ScalarExpression>(b->getExp1());
+          const std::string* clsName = NULL;
+          cls->getString(clsName);
+          int cType = 0;
+          if (!strcasecmp(clsName->c_str(), "vector")) {
+            cType = Collection::VectorType;
+          } else if (!strcasecmp(clsName->c_str(), "map")) {
+            cType = Collection::MapType;
+          } else if (!strcasecmp(clsName->c_str(), "stablemap")) {
+            cType = Collection::StableMapType;
+          } else {
+            throw IncludeTimeFatalException(b,
+              "Cannot use collection initialization for "
+              "non-collection class");
+          }
+          bool kvPairs = (cType == Collection::MapType ||
+                          cType == Collection::StableMapType);
+          int nElems = 0;
+          ExpressionListPtr el;
+          if (b->getExp2()) {
+            el = static_pointer_cast<ExpressionList>(b->getExp2());
+            nElems = el->getCount();
+          }
+          e.NewCol(cType, nElems);
+          if (kvPairs) {
+            for (int i = 0; i < nElems; i++) {
+              ArrayPairExpressionPtr ap(
+                static_pointer_cast<ArrayPairExpression>((*el)[i]));
+              ExpressionPtr key = ap->getName();
+              if (!key) {
+                throw IncludeTimeFatalException(ap,
+                  "Keys must be specified for Map and StableMap "
+                  "initialization");
+              }
+              visit(key);
+              emitConvertToCell(e);
+              visit(ap->getValue());
+              emitConvertToCell(e);
+              e.ColAddElemC();
+            }
+          } else {
+            for (int i = 0; i < nElems; i++) {
+              ArrayPairExpressionPtr ap(
+                static_pointer_cast<ArrayPairExpression>((*el)[i]));
+              ExpressionPtr key = ap->getName();
+              if ((bool)key) {
+                throw IncludeTimeFatalException(ap,
+                  "Keys may not be specified for Vector initialization");
+              }
+              visit(ap->getValue());
+              emitConvertToCell(e);
+              e.ColAddNewElemC();
+            }
           }
           return true;
         }
@@ -2875,6 +3067,11 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         SimpleFunctionCallPtr call(
           static_pointer_cast<SimpleFunctionCall>(node));
         ExpressionListPtr params = call->getParams();
+        auto inputIsAnObject = [&](int inputIndex) {
+          m_metaInfo.addKnownDataType(KindOfObject, /* predicted */ false,
+                                      m_ue.bcPos(), false, inputIndex);
+        };
+
         if (call->isFatalFunction()) {
           if (params && params->getCount() == 1) {
             ExpressionPtr p = (*params)[0];
@@ -2927,6 +3124,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           }
         } else if (call->isCompilerCallToFunction("hphp_unpack_continuation")) {
           ASSERT(params && params->getCount() == 1);
+          inputIsAnObject(0);
           e.UnpackCont();
           return true;
         } else if (call->isCompilerCallToFunction("hphp_pack_continuation")) {
@@ -2938,6 +3136,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
 
           visit((*params)[2]);
           emitConvertToCell(e);
+          inputIsAnObject(1);
           e.PackCont(lVar.asInt64Val());
           return false;
         } else if (call->isCompilerCallToFunction("hphp_create_continuation")) {
@@ -2953,13 +3152,16 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           e.CreateCont(callGetArgs, nameStr);
           return true;
         } else if (call->isCompilerCallToFunction("hphp_continuation_raised")) {
+          inputIsAnObject(0);
           e.ContRaised();
           return false;
         } else if (
             call->isCompilerCallToFunction("hphp_continuation_receive")) {
+          inputIsAnObject(0);
           e.ContReceive();
           return true;
         } else if (call->isCompilerCallToFunction("hphp_continuation_done")) {
+          inputIsAnObject(0);
           e.ContDone();
           return false;
         } else if ((call->isCallToFunction("class_exists") ||
@@ -3273,14 +3475,20 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           if (tru.isUsed()) {
             tru.set(e);
           }
-          visit(q->getYes());
-          emitConvertToCell(e);
-          e.Jmp(done);
-          fals.set(e);
-          visit(q->getNo());
-          emitConvertToCell(e);
-          done.set(e);
-          m_evalStack.cleanTopMeta();
+          if (currentPositionIsReachable()) {
+            visit(q->getYes());
+            emitConvertToCell(e);
+            e.Jmp(done);
+          }
+          if (fals.isUsed()) fals.set(e);
+          if (currentPositionIsReachable()) {
+            visit(q->getNo());
+            emitConvertToCell(e);
+          }
+          if (done.isUsed()) {
+            done.set(e);
+            m_evalStack.cleanTopMeta();
+          }
         } else {
           // <expr> ?: <expr>
           Label done;
@@ -3476,12 +3684,13 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           bool hasKey = (bool)key;
           if (hasKey) {
             visit(key);
-            emitConvertToCell(e);
+            emitConvertToCellOrLoc(e);
           }
           visit(ap->getValue());
           if (ap->isRef()) {
             emitConvertToVar(e);
             if (hasKey) {
+              emitConvertSecondToCell(e);
               e.AddElemV();
             } else {
               e.AddNewElemV();
@@ -3489,6 +3698,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           } else {
             emitConvertToCell(e);
             if (hasKey) {
+              emitConvertSecondToCell(e);
               e.AddElemC();
             } else {
               e.AddNewElemC();
@@ -3553,11 +3763,10 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         const static StringData* parentName =
           StringData::GetStaticString("closure");
         const Location* sLoc = ce->getLocation().get();
-        PreClassEmitter* pce = m_ue.newPreClassEmitter(className,
-                                                       PreClass::NotHoistable);
+        PreClassEmitter* pce = m_ue.newPreClassEmitter(
+          className, PreClass::AlwaysHoistable);
         pce->init(sLoc->line0, sLoc->line1, m_ue.bcPos(),
                   AttrUnique | AttrPersistent, parentName, NULL);
-        e.DefCls(pce->id());
 
         // We're still at the closure definition site. Emit code to instantiate
         // the new anonymous class, with the use variables as arguments.
@@ -3576,7 +3785,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
 
         // Instance variables.
         TypedValue uninit;
-        TV_WRITE_UNINIT(&uninit);
+        tvWriteUninit(&uninit);
         for (int i = 0; i < useCount; ++i) {
           pce->addProperty(useVars[i].first, AttrPrivate, NULL, &uninit);
         }
@@ -3974,6 +4183,65 @@ static ssize_t getPassByRefKind(ExpressionPtr exp) {
   }
   // All other cases
   return PassByRefKind::ErrorOnCell;
+}
+
+void EmitterVisitor::emitBuiltinCallArg(Emitter& e,
+                                         ExpressionPtr exp,
+                                         int paramId,
+                                         bool byRef) {
+  visit(exp);
+  if (checkIfStackEmpty("BPass*")) return;
+  if (byRef) {
+    emitVGet(e);
+    m_metaInfo.add(m_ue.bcPos(), Unit::MetaInfo::NopOut, false, 0, 0);
+    e.BPassV(paramId);
+  } else {
+    emitCGet(e);
+    m_metaInfo.add(m_ue.bcPos(), Unit::MetaInfo::NopOut, false, 0, 0);
+    e.BPassC(paramId);
+  }
+  return;
+}
+
+void EmitterVisitor::emitBuiltinDefaultArg(Emitter& e, Variant& v,
+                                           DataType t, int paramId) {
+  switch (v.getType()) {
+    case KindOfString:
+    case KindOfStaticString: {
+      StringData *nValue = StringData::GetStaticString(v.getStringData());
+      e.String(nValue);
+      break;
+    }
+    case KindOfInt64:
+      e.Int(v.getInt64());
+      break;
+    case KindOfBoolean:
+      if (v.getBoolean()) {
+        e.True();
+      } else {
+        e.False();
+      }
+      break;
+    case KindOfNull:
+      switch (t) {
+        case KindOfString:
+        case KindOfStaticString:
+        case KindOfObject:
+        case KindOfArray:
+          e.Int(0);
+          break;
+        case KindOfUnknown:
+          e.NullUninit();
+          break;
+        default:
+          not_reached();
+      }
+      break;
+    default:
+      not_reached();
+  }
+  m_metaInfo.add(m_ue.bcPos(), Unit::MetaInfo::NopOut, false, 0, 0);
+  e.BPassC(paramId);
 }
 
 void EmitterVisitor::emitFuncCallArg(Emitter& e,
@@ -4474,17 +4742,17 @@ Label* EmitterVisitor::getContinuationGotoLabel(StatementPtr s) {
     StatementPtr s((*stmts)[i]);
     if (s->is(Statement::KindOfFunctionStatement)) {
       FunctionStatementPtr f(static_pointer_cast<FunctionStatement>(s));
-      assert(f->getFunctionScope()->isGenerator());
+      always_assert(f->getFunctionScope()->isGenerator());
       visit(f);
     } else if (s->is(Statement::KindOfGotoStatement)) {
       GotoStatementPtr g(static_pointer_cast<GotoStatement>(s));
-      assert(label == NULL);
+      always_assert(label == NULL);
       label = &m_gotoLabels[StringData::GetStaticString(g->label())];
     } else {
       not_implemented();
     }
   }
-  assert(label);
+  always_assert(label);
   return label;
 }
 
@@ -4521,63 +4789,90 @@ void EmitterVisitor::emitContinuationSwitch(Emitter& e,
   }
 }
 
-bool EmitterVisitor::emitIntegerSwitch(Emitter& e,
-                                       SwitchStatementPtr sw,
-                                       std::vector<Label>& caseLabels,
-                                       Label& done) {
+DataType EmitterVisitor::analyzeSwitch(SwitchStatementPtr sw,
+                                       SwitchState& state) {
+  auto& caseMap = state.cases;
+  DataType t = KindOfUninit;
   StatementListPtr cases(sw->getCases());
   const int ncase = cases->getCount();
-  int defI = -1;
-  int nonZeroI = -1;
-  // Map from case value to index in caseLabels
-  std::map<int64, int> caseMap;
 
-  // Bail if there are one or more non-integer cases
+  // Bail if the cases aren't homogeneous
   for (int i = 0; i < ncase; ++i) {
     CaseStatementPtr c(static_pointer_cast<CaseStatement>((*cases)[i]));
     ExpressionPtr condition = c->getCondition();
     if (condition) {
       Variant cval;
-      if (!(condition->getScalarValue(cval) && cval.getType() == KindOfInt64)) {
-        return false;
+      DataType caseType;
+      if (condition->getScalarValue(cval)) {
+        caseType = cval.getType();
+        if (caseType == KindOfStaticString) caseType = KindOfString;
+        if ((caseType != KindOfInt64 && caseType != KindOfString) ||
+            !IMPLIES(t != KindOfUninit, caseType == t)) {
+          return KindOfInvalid;
+        }
+        t = caseType;
+      } else {
+        return KindOfInvalid;
       }
-      int64 n = cval.asInt64Val();
+      int64 n;
+      bool isNonZero;
+      if (t == KindOfInt64) {
+        n = cval.asInt64Val();
+        isNonZero = n;
+      } else {
+        always_assert(t == KindOfString);
+        n = m_ue.mergeLitstr(cval.asStrRef().get());
+        isNonZero = false; // not used for string switches
+      }
       if (!mapContains(caseMap, n)) {
         // If 'case n:' appears multiple times, only the first will
         // ever match
         caseMap[n] = i;
+        if (t == KindOfString) {
+          // We have to preserve the original order of the cases for string
+          // switches because of insane things like 0 being equal to any string
+          // that is not a nonzero numeric string.
+          state.caseOrder.push_back(StrCase(safe_cast<Id>(n), i));
+        }
       }
-      if (nonZeroI == -1 && n != 0) {
+      if (state.nonZeroI == -1 && isNonZero) {
         // true is equal to any non-zero integer, so to preserve php's
         // switch semantics we have to remember the first non-zero
         // case to appear in the source text
-        nonZeroI = i;
+        state.nonZeroI = i;
       }
     } else {
       // Last 'default:' wins
-      defI = i;
+      state.defI = i;
     }
   }
 
-  if (caseMap.empty()) {
-    // If there are no non-default cases, evaluate the subject for
-    // side effects and fall through. If there's a default case it
-    // will be emitted immediately after this.
-    visit(sw->getExp());
-    emitPop(e);
-    return true;
+  if (t == KindOfInt64) {
+    int64 base = caseMap.begin()->first;
+    int64 nTargets = caseMap.rbegin()->first - base + 1;
+    // Fail if the cases are too sparse
+    if ((float)caseMap.size() / nTargets < 0.5) {
+      return KindOfInvalid;
+    }
+  } else if (t == KindOfString) {
+    if (caseMap.size() < kMinStringSwitchCases) {
+      return KindOfInvalid;
+    }
   }
 
+  return t;
+}
+
+void EmitterVisitor::emitIntegerSwitch(Emitter& e, SwitchStatementPtr sw,
+                                       std::vector<Label>& caseLabels,
+                                       Label& done, const SwitchState& state) {
+  auto& caseMap = state.cases;
   int64 base = caseMap.begin()->first;
   int64 nTargets = caseMap.rbegin()->first - base + 1;
-  // Fail if the cases are too sparse
-  if ((float)caseMap.size() / nTargets < 0.5) {
-    return false;
-  }
 
   // It's on. Map case values to Labels, filling in the blanks as
   // appropriate.
-  Label* defLabel = defI == -1 ? &done : &caseLabels[defI];
+  Label* defLabel = state.defI == -1 ? &done : &caseLabels[state.defI];
   std::vector<Label*> labels(nTargets + 2);
   for (int i = 0; i < nTargets; ++i) {
     int caseIdx;
@@ -4589,13 +4884,30 @@ bool EmitterVisitor::emitIntegerSwitch(Emitter& e,
   }
 
   // Fill in offsets for the first non-zero case and default
-  labels[labels.size() - 2] = nonZeroI == -1 ? defLabel : &caseLabels[nonZeroI];
+  labels[labels.size() - 2] =
+    state.nonZeroI == -1 ? defLabel : &caseLabels[state.nonZeroI];
   labels[labels.size() - 1] = defLabel;
 
   visit(sw->getExp());
   emitConvertToCell(e);
   e.Switch(labels, base, 1);
-  return true;
+}
+
+void EmitterVisitor::emitStringSwitch(Emitter& e, SwitchStatementPtr sw,
+                                      std::vector<Label>& caseLabels,
+                                      Label& done, const SwitchState& state) {
+  std::vector<Emitter::StrOff> labels;
+  for (auto& pair : state.caseOrder) {
+    labels.push_back(Emitter::StrOff(pair.first, &caseLabels[pair.second]));
+  }
+
+  // Default case comes last
+  Label* defLabel = state.defI == -1 ? &done : &caseLabels[state.defI];
+  labels.push_back(Emitter::StrOff(-1, defLabel));
+
+  visit(sw->getExp());
+  emitConvertToCell(e);
+  e.SSwitch(labels);
 }
 
 void EmitterVisitor::markElem(Emitter& e) {
@@ -4788,19 +5100,18 @@ void EmitterVisitor::emitPostponedMeths() {
     ASSERT(m_actualStackHighWater == 0);
     ASSERT(m_fdescHighWater == 0);
     PostponedMeth& p = m_postponedMeths.front();
+    FunctionScopePtr funcScope = p.m_meth->getFunctionScope();
     FuncEmitter* fe = p.m_fe;
     if (!fe) {
       ASSERT(p.m_top);
       const StringData* methName =
         StringData::GetStaticString(p.m_meth->getOriginalName());
       fe = new FuncEmitter(m_ue, -1, -1, methName);
-      fe->setIsGenerator(p.m_meth->getFunctionScope()->isGenerator());
-      fe->setIsGeneratorFromClosure(
-        p.m_meth->getFunctionScope()->isGeneratorFromClosure());
+      fe->setIsGenerator(funcScope->isGenerator());
+      fe->setIsGeneratorFromClosure(funcScope->isGeneratorFromClosure());
       p.m_fe = fe;
       top_fes.push_back(fe);
     }
-    FunctionScopePtr funcScope = p.m_meth->getFunctionScope();
     const FunctionScope::UserAttributeMap& userAttrs =
       funcScope->userAttributes();
     for (FunctionScope::UserAttributeMap::const_iterator it = userAttrs.begin();
@@ -4846,17 +5157,26 @@ void EmitterVisitor::emitPostponedMeths() {
       }
       // Store info about the default value if there is one.
       if (par->isOptional()) {
-        std::ostringstream os;
-        CodeGenerator cg(&os, CodeGenerator::PickledPHP);
-        AnalysisResultPtr ar(new AnalysisResult());
-        par->defaultValue()->outputPHP(cg, ar);
-        pi.setPhpCode(StringData::GetStaticString(os.str()));
+        const StringData* phpCode;
         ExpressionPtr vNode = par->defaultValue();
         if (vNode->isScalar()) {
           TypedValue dv;
           initScalar(dv, vNode);
           pi.setDefaultValue(dv);
+
+          // Simple case: it's a scalar value so we just serialize it
+          VariableSerializer vs(VariableSerializer::PHPOutput);
+          String result = vs.serialize(tvAsCVarRef(&dv), true);
+          phpCode = StringData::GetStaticString(result.data());
+        } else {
+          // Non-scalar, so we have to output PHP from the AST node
+          std::ostringstream os;
+          CodeGenerator cg(&os, CodeGenerator::PickledPHP);
+          AnalysisResultPtr ar(new AnalysisResult());
+          vNode->outputPHP(cg, ar);
+          phpCode = StringData::GetStaticString(os.str());
         }
+        pi.setPhpCode(phpCode);
       }
       ExpressionListPtr paramUserAttrs =
         dynamic_pointer_cast<ExpressionList>(par->userAttributeList());
@@ -4894,14 +5214,17 @@ void EmitterVisitor::emitPostponedMeths() {
     ModifierExpressionPtr mod(p.m_meth->getModifiers());
     Attr attrs = buildAttrs(mod, p.m_meth->isRef());
 
-    if (p.m_meth->getFunctionScope()->mayUseVV()) {
+    if (funcScope->mayUseVV()) {
       attrs = attrs | AttrMayUseVV;
     }
 
     if (Option::WholeProgram) {
       if (!funcScope->isRedeclaring()) {
         attrs = attrs | AttrUnique;
-        if (funcScope->isPersistent()) {
+        if (p.m_top &&
+            (!funcScope->isVolatile() ||
+             funcScope->isPersistent() ||
+             funcScope->isGenerator())) {
           attrs = attrs | AttrPersistent;
         }
       }
@@ -4918,7 +5241,7 @@ void EmitterVisitor::emitPostponedMeths() {
           */
           attrs = attrs | AttrTrait;
         }
-        if (!p.m_meth->getFunctionScope()->hasOverride()) {
+        if (!funcScope->hasOverride()) {
           attrs = attrs | AttrNoOverride;
         }
       }
@@ -5431,11 +5754,66 @@ bool EmitterVisitor::emitCallUserFunc(Emitter& e, SimpleFunctionCallPtr func) {
   return true;
 }
 
+bool EmitterVisitor::canEmitBuiltinCall(FunctionCallPtr fn,
+                                        const std::string& name,
+                                        int numParams) {
+  if (Option::JitEnableRenameFunction) {
+    return false;
+  }
+  if (Option::DynamicInvokeFunctions.size()) {
+    if (Option::DynamicInvokeFunctions.find(name) !=
+        Option::DynamicInvokeFunctions.end()) {
+      return false;
+    }
+  }
+  FunctionScopePtr func = fn->getFuncScope();
+  if (!func || func->getMaxParamCount() > kMaxBuiltinArgs) {
+    return false;
+  }
+  if (!func->isUserFunction() && !func->needsActRec()
+      && (uint)numParams >= func->getMinParamCount()
+      && (uint)numParams <= func->getMaxParamCount()) {
+    if (func->isVariableArgument() || func->isReferenceVariableArgument()
+                || func->isMixedVariableArgument()) {
+      return false;
+    }
+    TypePtr t = func->getReturnType();
+    if (!t || t->getHhvmDataType() == KindOfDouble) {
+      return false;
+    }
+    for (int i = 0; i < func->getMaxParamCount(); i++) {
+      t = func->getParamType(i);
+      if (!t || t->getHhvmDataType() == KindOfDouble) {
+        return false;
+      }
+      // unserializable default values such as TimeStamp::Current()
+      // are serialized as kUnserializableString ("\x01")
+      if (i >= numParams && func->getParamDefault(i) == kUnserializableString) {
+        return false;
+      }
+    }
+    // Special handling for func_get_args and friends inside a generator.
+    if (m_curFunc->isGenerator() &&
+        (name == "func_get_args" || name == "func_num_args"
+         || name == "func_get_arg")) {
+      return false;
+    }
+    // in sandbox mode, don't emit FCallBuiltin for redefinable functions
+    if (func->ignoreRedefinition() && !Option::WholeProgram) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 void EmitterVisitor::emitFuncCall(Emitter& e, FunctionCallPtr node) {
   ExpressionPtr nameExp = node->getNameExp();
   const std::string& nameStr = node->getOriginalName();
   ExpressionListPtr params(node->getParams());
   int numParams = params ? params->getCount() : 0;
+  bool isBuiltinCall = false;
+  StringData* nLiteral = NULL;
   Offset fpiStart;
   if (node->getClass() || !node->getClassName().empty()) {
     bool isSelfOrParent = node->isSelf() || node->isParent();
@@ -5473,9 +5851,11 @@ void EmitterVisitor::emitFuncCall(Emitter& e, FunctionCallPtr node) {
     }
   } else if (!nameStr.empty()) {
     // foo()
-    StringData* nLiteral = StringData::GetStaticString(nameStr);
+    nLiteral = StringData::GetStaticString(nameStr);
+    isBuiltinCall = canEmitBuiltinCall(node, nameStr, numParams);
 
-    if (!m_curFunc->isGenerator()) {
+    if (isBuiltinCall) {
+    } else if (!m_curFunc->isGenerator()) {
       fpiStart = m_ue.bcPos();
       e.FPushFuncD(numParams, nLiteral);
     } else {
@@ -5516,15 +5896,35 @@ void EmitterVisitor::emitFuncCall(Emitter& e, FunctionCallPtr node) {
     fpiStart = m_ue.bcPos();
     e.FPushFunc(numParams);
   }
-  {
-    FPIRegionRecorder fpi(this, m_ue, m_evalStack, fpiStart);
-    for (int i = 0; i < numParams; i++) {
-      emitFuncCallArg(e, (*params)[i], i);
+  if (isBuiltinCall) {
+    FunctionScopePtr func = node->getFuncScope();
+    ASSERT(func);
+    ASSERT(numParams <= func->getMaxParamCount()
+           && numParams >= func->getMinParamCount());
+    int i = 0;
+    for (; i < numParams; i++) {
+      // for builtin calls, since we don't push the ActRec, we
+      // must determine the reffiness statically
+      bool byRef = func->isRefParam(i);
+      emitBuiltinCallArg(e, (*params)[i], i, byRef);
     }
+    for (; i < func->getMaxParamCount(); i++) {
+      Variant v = f_unserialize(func->getParamDefault(i));
+      TypePtr t = func->getParamType(i);
+      emitBuiltinDefaultArg(e, v, t->getDataType(), i);
+    }
+    e.FCallBuiltin(func->getMaxParamCount(), numParams, nLiteral);
+  } else {
+    {
+      FPIRegionRecorder fpi(this, m_ue, m_evalStack, fpiStart);
+      for (int i = 0; i < numParams; i++) {
+        emitFuncCallArg(e, (*params)[i], i);
+      }
+    }
+    e.FCall(numParams);
   }
-  e.FCall(numParams);
   if (Option::WholeProgram) {
-    fixReturnType(e, node);
+    fixReturnType(e, node, isBuiltinCall);
   }
 }
 
@@ -5597,7 +5997,7 @@ PreClass::Hoistable EmitterVisitor::emitClass(Emitter& e, ClassScopePtr cNode,
     if (!cNode->isRedeclaring() &&
         !cNode->derivesFromRedeclaring()) {
       attr = attr | AttrUnique;
-      if (cNode->isPersistent()) {
+      if (!cNode->isVolatile()) {
         attr = attr | AttrPersistent;
       }
     }
@@ -5627,7 +6027,8 @@ PreClass::Hoistable EmitterVisitor::emitClass(Emitter& e, ClassScopePtr cNode,
       }
     }
     if (hoistable == PreClass::NotHoistable) {
-      hoistable = PreClass::AlwaysHoistable;
+      hoistable = attr & AttrUnique ?
+        PreClass::AlwaysHoistable : PreClass::MaybeHoistable;
       m_hoistables.insert(cNode->getOriginalName());
     }
   }
@@ -5701,7 +6102,7 @@ PreClass::Hoistable EmitterVisitor::emitClass(Emitter& e, ClassScopePtr cNode,
             if (vNode->isScalar()) {
               initScalar(tvVal, vNode);
             } else {
-              TV_WRITE_UNINIT(&tvVal);
+              tvWriteUninit(&tvVal);
               if (!(attrs & AttrStatic)) {
                 if (nonScalarPinitVec == NULL) {
                   nonScalarPinitVec = new NonScalarVec();
@@ -5715,7 +6116,7 @@ PreClass::Hoistable EmitterVisitor::emitClass(Emitter& e, ClassScopePtr cNode,
               }
             }
           } else {
-            TV_WRITE_NULL(&tvVal);
+            tvWriteNull(&tvVal);
           }
           bool added UNUSED =
             pce->addProperty(propName, attrs, propDoc, &tvVal);
@@ -5740,7 +6141,7 @@ PreClass::Hoistable EmitterVisitor::emitClass(Emitter& e, ClassScopePtr cNode,
           } else if (vNode->isScalar()) {
             initScalar(tvVal, vNode);
           } else {
-            TV_WRITE_UNINIT(&tvVal);
+            tvWriteUninit(&tvVal);
             if (nonScalarConstVec == NULL) {
               nonScalarConstVec = new NonScalarVec();
             }
@@ -5862,117 +6263,128 @@ class ForeachIterGuard {
   }
 };
 
-void EmitterVisitor::emitForeach(Emitter& e,
-                                 ExpressionPtr val, ExpressionPtr key,
-                                 StatementPtr body, bool strong) {
+void EmitterVisitor::emitForeach(Emitter& e, ForEachStatementPtr fe) {
+  ExpressionPtr ae(static_pointer_cast<Expression>(
+                      fe->getNthKid(ForEachStatement::ArrayExpr)));
+  ExpressionPtr val(static_pointer_cast<Expression>(
+                      fe->getNthKid(ForEachStatement::ValueExpr)));
+  ExpressionPtr key(static_pointer_cast<Expression>(
+                      fe->getNthKid(ForEachStatement::NameExpr)));
+  StatementPtr body(static_pointer_cast<Statement>(
+                      fe->getNthKid(ForEachStatement::BodyStmt)));
+  int keyTempLocal;
+  int valTempLocal;
+  bool strong = fe->isStrong();
   Label exit;
   Label next;
   Label brkHand;
   Label cntHand;
+  Label start;
+  Offset bIterStart;
   Id itId = m_curFunc->allocIterator();
   ForeachIterGuard fig(*this, itId);
-  if (strong) {
-    e.IterInitM(itId, exit);
-  } else {
-    e.IterInit(itId, exit);
-  }
-  Label start(e);
-  Offset bIterStart = m_ue.bcPos();
-
-  // The evaluation order for the beginning of each foreach iteration is
-  // IterValue*, IterKey, the key expression, and finally the value expression.
-  // In the general case we need to use unnamed locals to get evaluation order
-  // right. Fortunately, in the common case the key and value expressions are
-  // simple variables and so we can evaluate them out of order without causing
-  // observable changes in program behavior and avoid the need for unnamed
-  // locals.
   bool simpleCase = (!key || key->is(Expression::KindOfSimpleVariable)) &&
                              val->is(Expression::KindOfSimpleVariable);
 
   if (simpleCase) {
+    SimpleVariablePtr svVal(static_pointer_cast<SimpleVariable>(val));
+    StringData* name = StringData::GetStaticString(svVal->getName());
+    valTempLocal = m_curFunc->lookupVarId(name);
     if (key) {
+      SimpleVariablePtr svKey(static_pointer_cast<SimpleVariable>(key));
+      name = StringData::GetStaticString(svKey->getName());
+      keyTempLocal = m_curFunc->lookupVarId(name);
       visit(key);
+      // Meta info on the key local will confuse the translator (and
+      // wouldn't be useful anyway)
+      m_evalStack.cleanTopMeta();
+    } else {
+      // Make gcc happy
+      keyTempLocal = -1;
     }
     visit(val);
+    // Meta info on the value local will confuse the translator (and
+    // wouldn't be useful anyway)
+    m_evalStack.cleanTopMeta();
+    visit(ae);
     if (strong) {
-      e.IterValueV(itId);
-      emitBind(e);
+      emitConvertToVar(e);
+      if (key) {
+        e.IterInitMK(itId, exit, valTempLocal, keyTempLocal);
+      } else {
+        e.IterInitM(itId, exit, valTempLocal);
+      }
     } else {
-      e.IterValueC(itId);
-      emitSet(e);
+      emitConvertToCell(e);
+      if (key) {
+        e.IterInitK(itId, exit, valTempLocal, keyTempLocal);
+      } else {
+        e.IterInit(itId, exit, valTempLocal);
+      }
     }
-    emitPop(e);
-    if (key) {
-      e.IterKey(itId);
-      emitSet(e);
-      emitPop(e);
-    }
+
+    start.set(e);
+    bIterStart = m_ue.bcPos();
   } else {
-    // Allocate unnamed locals keyTempLocal (if there is a key
-    // expression) and valTempLocal
-    int keyTempLocal = key ? m_curFunc->allocUnnamedLocal() : -1;
-    int valTempLocal = m_curFunc->allocUnnamedLocal();
-    // Evaluate IterValue* and stash the result in valTempLocal
+    keyTempLocal = key ? m_curFunc->allocUnnamedLocal() : -1;
+    valTempLocal = m_curFunc->allocUnnamedLocal();
     if (key) {
       emitVirtualLocal(keyTempLocal);
     }
     emitVirtualLocal(valTempLocal);
+
+    visit(ae);
     if (strong) {
-      e.IterValueV(itId);
-      emitBind(e);
+      emitConvertToVar(e);
     } else {
-      e.IterValueC(itId);
-      emitSet(e);
+      emitConvertToCell(e);
     }
-    emitPop(e);
+
+    if (strong) {
+      if (key) {
+        e.IterInitMK(itId, exit, valTempLocal, keyTempLocal);
+      } else {
+        e.IterInitM(itId, exit, valTempLocal);
+      }
+    } else {
+      if (key) {
+        e.IterInitK(itId, exit, valTempLocal, keyTempLocal);
+      } else {
+        e.IterInit(itId, exit, valTempLocal);
+      }
+    }
+
+    // At this point, valTempLocal and keyTempLocal if applicable, contain the
+    // key and value for the iterator.
+    start.set(e);
+    bIterStart = m_ue.bcPos();
     if (key) {
-      // Evaluate IterKey and stash the result in keyTempLocal
-      e.IterKey(itId);
-      emitSet(e);
-      e.PopC();
-      // Evaluate the key expression
       visit(key);
     }
-    // Evaluate the value expression
     visit(val);
-    // Push valTempLocal onto the stack
     emitVirtualLocal(valTempLocal);
     if (strong) {
       emitVGet(e);
-    } else {
-      emitCGet(e);
-    }
-    // Unset valTempLocal
-    emitVirtualLocal(valTempLocal);
-    emitUnset(e);
-    // We're done with valTempLocal, set up a fault region
-    // for it and free it
-    newFaultRegion(bIterStart, m_ue.bcPos(),
-                   new UnsetUnnamedLocalThunklet(valTempLocal));
-    m_curFunc->freeUnnamedLocal(valTempLocal);
-    // Do the assignment for the value
-    if (strong) {
       emitBind(e);
     } else {
+      emitCGet(e);
       emitSet(e);
     }
     emitPop(e);
+    emitVirtualLocal(valTempLocal);
+    emitUnset(e);
+    newFaultRegion(bIterStart, m_ue.bcPos(),
+                   new UnsetUnnamedLocalThunklet(valTempLocal));
     if (key) {
       ASSERT(keyTempLocal != -1);
-      // Push keyTempLocal onto the stack
       emitVirtualLocal(keyTempLocal);
       emitCGet(e);
-      // Unset keyTempLocal
-      emitVirtualLocal(keyTempLocal);
-      emitUnset(e);
-      // We're done with keyTempLocal, set up a fault region
-      // for it and free it
-      newFaultRegion(bIterStart, m_ue.bcPos(),
-                     new UnsetUnnamedLocalThunklet(keyTempLocal));
-      m_curFunc->freeUnnamedLocal(keyTempLocal);
-      // Do the assignment for the key
       emitSet(e);
       emitPop(e);
+      emitVirtualLocal(keyTempLocal);
+      emitUnset(e);
+      newFaultRegion(bIterStart, m_ue.bcPos(),
+                     new UnsetUnnamedLocalThunklet(keyTempLocal));
     }
   }
 
@@ -5984,12 +6396,39 @@ void EmitterVisitor::emitForeach(Emitter& e,
   if (next.isUsed() || needBreakHandler) {
     next.set(e);
   }
-  e.IterNext(itId, start);
-  // Set up a fault region to free the iterator variable.
+  if (key) {
+    emitVirtualLocal(keyTempLocal);
+    // Meta info on the key local will confuse the translator (and
+    // wouldn't be useful anyway)
+    m_evalStack.cleanTopMeta();
+  }
+  emitVirtualLocal(valTempLocal);
+  // Meta info on the value local will confuse the translator (and
+  // wouldn't be useful anyway)
+  m_evalStack.cleanTopMeta();
+  if (strong) {
+    if (key) {
+      e.IterNextMK(itId, start, valTempLocal, keyTempLocal);
+    } else {
+      e.IterNextM(itId, start, valTempLocal);
+    }
+  } else {
+    if (key) {
+      e.IterNextK(itId, start, valTempLocal, keyTempLocal);
+    } else {
+      e.IterNext(itId, start, valTempLocal);
+    }
+  }
   newFaultRegion(bIterStart, m_ue.bcPos(), new IterFreeThunklet(itId), itId);
   if (needBreakHandler) {
     e.Jmp(exit);
     emitBreakHandler(e, exit, next, brkHand, cntHand, itId);
+  }
+  if (!simpleCase) {
+    m_curFunc->freeUnnamedLocal(valTempLocal);
+    if (key) {
+      m_curFunc->freeUnnamedLocal(keyTempLocal);
+    }
   }
   exit.set(e);
   m_curFunc->freeIterator(itId);
@@ -6224,9 +6663,7 @@ void EmitterVisitor::initScalar(TypedValue& tvVal, ExpressionPtr val) {
         tvVal.m_data.parr = va;
         tvVal.m_type = KindOfArray;
 
-        if (a->decRefCount() == 0) {
-          a->release();
-        }
+        decRefArr(a);
         break;
       }
       // Fall through
@@ -6271,7 +6708,7 @@ static ConstructPtr doOptimize(ConstructPtr c, AnalysisResultConstPtr ar) {
 
 static Unit* emitHHBCUnit(AnalysisResultPtr ar, FileScopePtr fsp,
                           const MD5& md5, UnitOrigin unitOrigin, bool commit) {
-  if (fsp->getPseudoMain()) {
+  if (fsp->getPseudoMain() && !Option::WholeProgram) {
     ar->setPhase(AnalysisResult::FirstPreOptimize);
     doOptimize(fsp->getPseudoMain()->getStmt(), ar);
   }
@@ -6354,11 +6791,14 @@ static Unit* emitHHBCNativeFuncUnit(const HhbcExtFuncInfo* builtinFuncs,
   for (ssize_t i = 0LL; i < numBuiltinFuncs; ++i) {
     const HhbcExtFuncInfo* info = &builtinFuncs[i];
     StringData* name = StringData::GetStaticString(info->m_name);
-    BuiltinFunction bif = (BuiltinFunction)info->m_pGenericFunc;
+    BuiltinFunction bif = (BuiltinFunction)info->m_builtinFunc;
+    BuiltinFunction nif = (BuiltinFunction)info->m_nativeFunc;
     const ClassInfo::MethodInfo* mi = ClassInfo::FindFunction(name);
+    ASSERT(mi &&
+      "MethodInfo not found; probably need to rebuild src/system");
     FuncEmitter* fe = ue->newFuncEmitter(name, /*top*/ true);
     Offset base = ue->bcPos();
-    fe->setBuiltinFunc(mi, bif, base);
+    fe->setBuiltinFunc(mi, bif, nif, base);
     ue->emitOp(OpNativeImpl);
     fe->setMaxStackCells(kNumActRecCells + 1);
     fe->setAttrs(fe->attrs() | AttrUnique | AttrPersistent);
@@ -6555,7 +6995,7 @@ static Unit* emitHHBCNativeClassUnit(const HhbcExtClassInfo* builtinClasses,
         const ClassInfo::MethodInfo* mi =
           e.ci->getMethodInfo(std::string(methodInfo->m_name));
         Offset base = ue->bcPos();
-        fe->setBuiltinFunc(mi, bcf, base);
+        fe->setBuiltinFunc(mi, bcf, NULL, base);
         ue->emitOp(OpNativeImpl);
       }
       Offset past = ue->bcPos();
@@ -6685,11 +7125,19 @@ Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
   if (UNLIKELY(!code)) {
     // Do initialization when code is null; see above.
     Option::EnableHipHopSyntax = RuntimeOption::EnableHipHopSyntax;
+    Option::JitEnableRenameFunction =
+      RuntimeOption::EvalJitEnableRenameFunction;
+    for (auto& i : RuntimeOption::DynamicInvokeFunctions) {
+      Option::DynamicInvokeFunctions.insert(i);
+    }
     Option::OutputHHBC = true;
     Option::ParseTimeOpts = false;
     Option::WholeProgram = false;
     Type::InitTypeHintMap();
     BuiltinSymbols::LoadSuperGlobals();
+    AnalysisResultPtr ar(new AnalysisResult());
+    BuiltinSymbols::Load(ar, true);
+    BuiltinSymbols::NoSuperGlobals = false;
     TypeConstraint tc;
     return NULL;
   }
@@ -6721,6 +7169,7 @@ Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
     FileScopePtr fsp = parser.getFileScope();
     fsp->setOuterScope(ar);
 
+    ar->loadBuiltins();
     ar->setPhase(AnalysisResult::AnalyzeAll);
     fsp->analyzeProgram(ar);
 

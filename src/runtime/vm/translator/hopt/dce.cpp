@@ -23,17 +23,15 @@ namespace HPHP {
 namespace VM {
 namespace JIT {
 
+// An IncRef is marked as REFCOUNT_CONSUMED[_OFF_TRACE], if it is consumed by
+// an instruction other than DecRefNZ that decrements the ref count.
+// * REFCOUNT_CONSUMED: consumed by such an instruction in the main trace
+// * REFCOUNT_CONSUMED_OFF_TRACE: consumed by such an instruction only
+//   in exit traces.
+const unsigned REFCOUNT_CONSUMED = 2;
+const unsigned REFCOUNT_CONSUMED_OFF_TRACE = 3;
 
 static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::hhir;
-
-static const int Essential[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef,  \
-            prodRef, mayModRefs, rematerializable, error)               \
-  essential,
-  IR_OPCODES
-  #undef OPC
-};
-
 
 /*
  * Dead code elimination
@@ -52,7 +50,7 @@ bool isEssential(IRInstruction* inst) {
   if (inst->isControlFlowInstruction() && inst->getOpcode() != LdCls) {
     return true;
   }
-  return Essential[inst->getOpcode()];
+  return opcodeHasFlags(inst->getOpcode(), Essential);
 }
 
 bool instructionIsMarkedDead(const IRInstruction* inst) {
@@ -406,6 +404,54 @@ void eliminateDeadCode(Trace* trace, IRFactory* irFactory) {
         // Set flag so Jcc and exits know this is active
         dst->setTCA(kIRDirectJccJmpActive);
       }
+    }
+  }
+
+  // If main trace starts with guards, have them generate a patchable jump
+  // to the anchor trace
+  if (RuntimeOption::EvalHHIRDirectExit) {
+    LabelInstruction* guardLabel = NULL;
+    IRInstruction::List& instList = trace->getInstructionList();
+    // Check the beginning of the trace for guards
+    for (IRInstruction::Iterator it = instList.begin(); it != instList.end();
+         ++it) {
+      IRInstruction* inst = *it;
+      Opcode opc = inst->getOpcode();
+      if (inst->getLabel() &&
+          (opc == LdLoc    || opc == LdStack ||
+           opc == GuardLoc || opc == GuardStk)) {
+        LabelInstruction* exitLabel = inst->getLabel();
+        // Find the GuardFailure's label and confirm this branches there
+        if (guardLabel == NULL) {
+          Trace* exitTrace = exitLabel->getTrace();
+          IRInstruction::List& xList = exitTrace->getInstructionList();
+          IRInstruction::Iterator instIter = xList.begin();
+          instIter++; // skip over label
+          // Confirm this is a GuardExit
+          for (IRInstruction::Iterator it = instIter; it != xList.end(); ++it) {
+            IRInstruction* i = *it;
+            Opcode op = i->getOpcode();
+            if (op == Marker) {
+              continue;
+            }
+            if (op == ExitGuardFailure) {
+              guardLabel = exitLabel;
+            }
+            // Do not optimize if other instructions are on exit trace
+            break;
+          }
+        }
+        if (exitLabel == guardLabel) {
+          inst->setTCA(kIRDirectGuardActive);
+          continue;
+        }
+        break;
+      }
+      if (opc == Marker || opc == DefLabel || opc == DefSP || opc == DefFP ||
+          opc == LdStack) {
+        continue;
+      }
+      break;
     }
   }
 }

@@ -767,7 +767,7 @@ void Util::find(std::vector<std::string> &out,
   }
 
   dirent *e;
-  while (e = readdir(dir)) {
+  while ((e = readdir(dir))) {
     char *ename = e->d_name;
 
     // skipping .  .. hidden files
@@ -886,7 +886,7 @@ char* Util::getNativeFunctionName(void* codeAddr) {
         int status;
         char* demangledName = abi::__cxa_demangle(functionName, 0, 0, &status);
         if (status == 0) {
-          free(functionName);
+          delete []functionName;
           functionName = demangledName;
         }
       }

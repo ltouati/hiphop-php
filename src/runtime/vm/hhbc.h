@@ -29,10 +29,15 @@ struct Unit;
 // examine its low-order bit. If it is zero, it's a 1-byte immediate; otherwise,
 // it's 4 bytes. The immediate has to be logical-shifted to the right by one to
 // get rid of the flag bit.
+
+// The types in this macro for MA, BLA, and SLA are meaningless since
+// they are never read out of ArgUnion (they use ImmVector and
+// ImmVectorO).
 #define ARGTYPES \
   ARGTYPE(NA,    void*)         /* unused */  \
   ARGTYPEVEC(MA, int32_t)       /* Member vector immediate */ \
   ARGTYPEVEC(BLA,Offset)        /* Bytecode address vector immediate */ \
+  ARGTYPEVEC(SLA,Id)            /* litstrid/offset pair vector */ \
   ARGTYPE(IVA,   int32_t)       /* variable size: 8 or 32-bit integer */  \
   ARGTYPE(I64A,  int64_t)       /* 64-bit Integer */ \
   ARGTYPE(HA,    int32_t)       /* Local variable ID: 8 or 32-bit int */  \
@@ -227,6 +232,7 @@ struct MInstrInfo {
   unsigned   m_valCount;
   bool       m_newElem;
   bool       m_finalGet;
+  const char* m_name;
 
   MInstr instr() const {
     return m_instr;
@@ -253,6 +259,10 @@ struct MInstrInfo {
   bool finalGet() const {
     return m_finalGet;
   }
+
+  const char* name() const {
+    return m_name;
+  }
 };
 
 static const MInstrInfo mInstrInfo[] = {
@@ -270,7 +280,8 @@ static const MInstrInfo mInstrInfo[] = {
     MInstrAttr((attrs) & MIA_intermediate), \
     MInstrAttr((attrs) & MIA_intermediate), \
     MInstrAttr((attrs) & MIA_final)}, \
-   unsigned(vC), bool((attrs) & MIA_new), bool((attrs) & MIA_final_get)},
+   unsigned(vC), bool((attrs) & MIA_new), bool((attrs) & MIA_final_get), \
+   #instr},
   MINSTRS
 #undef MII
 };
@@ -347,6 +358,7 @@ enum SetOpOp {
   O(BoxR,            NA,               ONE(RV),         ONE(VV),    NF) \
   O(UnboxR,          NA,               ONE(RV),         ONE(CV),    NF) \
   O(Null,            NA,               NOV,             ONE(CV),    NF) \
+  O(NullUninit,      NA,               NOV,             ONE(CV),    NF) \
   O(True,            NA,               NOV,             ONE(CV),    NF) \
   O(False,           NA,               NOV,             ONE(CV),    NF) \
   O(Int,             ONE(I64A),        NOV,             ONE(CV),    NF) \
@@ -359,6 +371,9 @@ enum SetOpOp {
   O(AddElemV,        NA,               THREE(VV,CV,CV), ONE(CV),    NF) \
   O(AddNewElemC,     NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(AddNewElemV,     NA,               TWO(VV,CV),      ONE(CV),    NF) \
+  O(NewCol,          TWO(IVA,IVA),     NOV,             ONE(CV),    NF) \
+  O(ColAddElemC,     NA,               THREE(CV,CV,CV), ONE(CV),    NF) \
+  O(ColAddNewElemC,  NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Cns,             ONE(SA),          NOV,             ONE(CV),    NF) \
   O(ClsCns,          ONE(SA),          ONE(AV),         ONE(CV),    NF) \
   O(ClsCnsD,         TWO(SA,SA),       NOV,             ONE(CV),    NF) \
@@ -404,6 +419,7 @@ enum SetOpOp {
   O(JmpNZ,           ONE(BA),          ONE(CV),         NOV,        CF) \
   O(Switch,          THREE(BLA,I64A,IVA),                               \
                                        ONE(CV),         NOV,        CF_TF) \
+  O(SSwitch,         ONE(SLA),         ONE(CV),         NOV,        CF_TF) \
   O(RetC,            NA,               ONE(CV),         NOV,        CF_TF) \
   O(RetV,            NA,               ONE(VV),         NOV,        CF_TF) \
   O(Unwind,          NA,               NOV,             NOV,        CF_TF) \
@@ -486,9 +502,11 @@ enum SetOpOp {
   O(FPushCufF,       ONE(IVA),         ONE(CV),         NOV,        NF) \
   O(FPushCufSafe,    ONE(IVA),         TWO(CV,CV),      TWO(CV,CV), NF) \
   O(FPassC,          ONE(IVA),         ONE(CV),         ONE(FV),    FF) \
+  O(BPassC,          ONE(IVA),         ONE(CV),         ONE(FV),    FF) \
   O(FPassCW,         ONE(IVA),         ONE(CV),         ONE(FV),    FF) \
   O(FPassCE,         ONE(IVA),         ONE(CV),         ONE(FV),    FF) \
   O(FPassV,          ONE(IVA),         ONE(VV),         ONE(FV),    FF) \
+  O(BPassV,          ONE(IVA),         ONE(VV),         ONE(FV),    FF) \
   O(FPassR,          ONE(IVA),         ONE(RV),         ONE(FV),    FF) \
   O(FPassL,          TWO(IVA,HA),      NOV,             ONE(FV),    FF) \
   O(FPassN,          ONE(IVA),         ONE(CV),         ONE(FV),    FF) \
@@ -497,14 +515,17 @@ enum SetOpOp {
   O(FPassM,          TWO(IVA,MA),      LMANY(),         ONE(FV),    FF) \
   O(FCall,           ONE(IVA),         FMANY,           ONE(RV),    CF_FF) \
   O(FCallArray,      NA,               ONE(FV),         ONE(RV),    CF_FF) \
+  O(FCallBuiltin,    THREE(IA,IA,SA),  FMANY,           ONE(RV),    CF) \
   O(CufSafeArray,    NA,               THREE(RV,CV,CV), ONE(CV),    NF) \
   O(CufSafeReturn,   NA,               THREE(RV,CV,CV), ONE(RV),    NF) \
-  O(IterInit,        TWO(IA,BA),       ONE(CV),         NOV,        CF) \
-  O(IterInitM,       TWO(IA,BA),       ONE(VV),         NOV,        CF) \
-  O(IterValueC,      ONE(IA),          NOV,             ONE(CV),    NF) \
-  O(IterValueV,      ONE(IA),          NOV,             ONE(VV),    NF) \
-  O(IterKey,         ONE(IA),          NOV,             ONE(CV),    NF) \
-  O(IterNext,        TWO(IA,BA),       NOV,             NOV,        CF) \
+  O(IterInit,        THREE(IA,BA,HA),  ONE(CV),         NOV,        CF) \
+  O(IterInitK,       FOUR(IA,BA,HA,HA),ONE(CV),         NOV,        CF) \
+  O(IterInitM,       THREE(IA,BA,HA),  ONE(VV),         NOV,        CF) \
+  O(IterInitMK,      FOUR(IA,BA,HA,HA),ONE(VV),         NOV,        CF) \
+  O(IterNext,        THREE(IA,BA,HA),  NOV,             NOV,        CF) \
+  O(IterNextK,       FOUR(IA,BA,HA,HA),NOV,             NOV,        CF) \
+  O(IterNextM,       THREE(IA,BA,HA),  NOV,             NOV,        CF) \
+  O(IterNextMK,      FOUR(IA,BA,HA,HA),NOV,             NOV,        CF) \
   O(IterFree,        ONE(IA),          NOV,             NOV,        NF) \
   O(Incl,            NA,               ONE(CV),         ONE(CV),    CF) \
   O(InclOnce,        NA,               ONE(CV),         ONE(CV),    CF) \
@@ -548,6 +569,7 @@ enum SetOpOp {
   O(ContStopped,     NA,               NOV,             NOV,        NF) \
   O(ContHandle,      NA,               ONE(CV),         NOV,        CF_TF) \
   O(Strlen,          NA,               ONE(CV),         ONE(CV),    NF) \
+  O(IncStat,         TWO(IVA,IVA),     NOV,             NOV,        NF) \
   O(HighInvalid,     NA,               NOV,             NOV,        NF) \
 
 enum Op {
@@ -598,6 +620,11 @@ enum HighOp {
 #undef O
 };
 
+struct StrVecItem {
+  Id str;
+  Offset dest;
+};
+
 struct ImmVector {
   explicit ImmVector() : m_start(0) {}
 
@@ -636,11 +663,15 @@ struct ImmVector {
   const int32_t* vec32() const {
     return reinterpret_cast<const int32_t*>(m_start);
   }
+  const StrVecItem* strvec() const {
+    return reinterpret_cast<const StrVecItem*>(m_start);
+  }
 
   LocationCode locationCode() const { return LocationCode(*vec()); }
 
   /*
-   * Returns the length of the immediate vector in bytes.
+   * Returns the length of the immediate vector in bytes (for M
+   * vectors) or elements (for switch vectors)
    */
   int32_t size() const { return m_length; }
 
@@ -758,6 +789,32 @@ inline bool isFPush(Opcode opcode) {
 
 inline bool isFCallStar(Opcode opcode) {
   return opcode == OpFCall || opcode == OpFCallArray;
+}
+
+inline bool isSwitch(Opcode op) {
+  return op == OpSwitch || op == OpSSwitch;
+}
+
+template<typename L>
+void foreachSwitchTarget(Opcode* op, L func) {
+  ASSERT(isSwitch(*op));
+  bool isStr = readData<Opcode>(op) == OpSSwitch;
+  int32_t size = readData<int32_t>(op);
+  for (int i = 0; i < size; ++i) {
+    if (isStr) readData<Id>(op);
+    func(readData<Offset>(op));
+  }
+}
+
+template<typename L>
+void foreachSwitchString(Opcode* op, L func) {
+  ASSERT(*op == OpSSwitch);
+  readData<Opcode>(op);
+  int32_t size = readData<int32_t>(op) - 1; // the last item is the default
+  for (int i = 0; i < size; ++i) {
+    func(readData<Id>(op));
+    readData<Offset>(op);
+  }
 }
 
 int instrNumPops(const Opcode* opcode);

@@ -35,10 +35,11 @@
 #include <util/stack_trace.h>
 #include <util/process.h>
 #include <util/file_cache.h>
-#include <util/hardware_counter.h>
+#include <runtime/base/hardware_counter.h>
 #include <runtime/base/preg.h>
 #include <util/parser/scanner.h>
 #include <runtime/base/server/access_log.h>
+#include "runtime/base/crash_reporter.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -51,6 +52,7 @@ std::string RuntimeOption::PidFile = "www.pid";
 
 std::string RuntimeOption::LogFile;
 std::string RuntimeOption::LogFileSymLink;
+int RuntimeOption::LogHeaderMangle;
 bool RuntimeOption::AlwaysEscapeLog = false;
 bool RuntimeOption::AlwaysLogUnhandledExceptions = true;
 bool RuntimeOption::InjectedStackTrace = true;
@@ -103,6 +105,7 @@ bool RuntimeOption::ServerThreadJobLIFO = false;
 bool RuntimeOption::ServerThreadDropStack = false;
 bool RuntimeOption::ServerHttpSafeMode = false;
 bool RuntimeOption::ServerStatCache = true;
+std::vector<std::string> RuntimeOption::ServerWarmupRequests;
 int RuntimeOption::PageletServerThreadCount = 0;
 bool RuntimeOption::PageletServerThreadRoundRobin = false;
 int RuntimeOption::PageletServerThreadDropCacheTimeoutSeconds = 0;
@@ -259,6 +262,12 @@ bool RuntimeOption::ClearInputOnSuccess = true;
 std::string RuntimeOption::ProfilerOutputDir;
 std::string RuntimeOption::CoreDumpEmail;
 bool RuntimeOption::CoreDumpReport = true;
+std::string RuntimeOption::CoreDumpReportDirectory
+#if defined(HPHP_OSS)
+  ("/tmp");
+#else
+  ("/var/tmp/cores");
+#endif
 bool RuntimeOption::LocalMemcache = false;
 bool RuntimeOption::MemcacheReadOnly = false;
 
@@ -302,7 +311,7 @@ int RuntimeOption::MaxArrayChain = INT_MAX;
 bool RuntimeOption::UseHphpArray = hhvm;
 bool RuntimeOption::UseSmallArray = false;
 bool RuntimeOption::UseVectorArray = true;
-bool RuntimeOption::StrictCollections = false;
+bool RuntimeOption::StrictCollections = true;
 bool RuntimeOption::WarnOnCollectionToArray = false;
 bool RuntimeOption::UseDirectCopy = false;
 bool RuntimeOption::EnableApc = true;
@@ -350,6 +359,7 @@ bool RuntimeOption::EnableAspTags = false;
 bool RuntimeOption::EnableXHP = true;
 bool RuntimeOption::EnableObjDestructCall = false;
 bool RuntimeOption::EnableEmitSwitch = true;
+bool RuntimeOption::EnableEmitterStats = true;
 bool RuntimeOption::CheckSymLink = false;
 bool RuntimeOption::NativeXHP = true;
 int RuntimeOption::ScannerType = 0;
@@ -403,6 +413,7 @@ bool RuntimeOption::EvalJitCmovVarDeref = true;
 bool RuntimeOption::EvalJitTransCounters = false;
 bool RuntimeOption::EvalJitUseIR = false;
 bool RuntimeOption::EvalIRPuntDontInterp = false;
+bool RuntimeOption::EvalHHIRGenericDtorHelper = true;
 bool RuntimeOption::EvalHHIRMemOpt = false;
 uint32 RuntimeOption::EvalHHIRNumFreeRegs = (uint32)-1;
 bool RuntimeOption::EvalHHIREnableRematerialization = true;
@@ -426,11 +437,15 @@ bool RuntimeOption::EvalMapTCHuge = true;
 uint32 RuntimeOption::EvalConstEstimate = 10000;
 bool RuntimeOption::RecordCodeCoverage = false;
 std::string RuntimeOption::CodeCoverageOutputFile;
+size_t RuntimeOption::VMTranslASize = 512 << 20;
+size_t RuntimeOption::VMTranslAStubsSize = 512 << 20;
+size_t RuntimeOption::VMTranslGDataSize = RuntimeOption::VMTranslASize >> 2;
 
 std::string RuntimeOption::RepoLocalMode;
 std::string RuntimeOption::RepoLocalPath;
 std::string RuntimeOption::RepoCentralPath;
 std::string RuntimeOption::RepoEvalMode;
+std::string RuntimeOption::RepoJournal;
 bool RuntimeOption::RepoCommit = true;
 bool RuntimeOption::RepoDebugInfo = true;
 // Missing: RuntimeOption::RepoAuthoritative's physical location is
@@ -612,6 +627,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     Logger::DropCacheChunkSize =
       logger["DropCacheChunkSize"].getInt32(1 << 20);
     AlwaysEscapeLog = logger["AlwaysEscapeLog"].getBool(false);
+    RuntimeOption::LogHeaderMangle = logger["HeaderMangle"].getInt32(0);
 
     AlwaysLogUnhandledExceptions =
       logger["AlwaysLogUnhandledExceptions"].getBool(true);
@@ -698,6 +714,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     ServerThreadDropStack = server["ThreadDropStack"].getBool();
     ServerHttpSafeMode = server["HttpSafeMode"].getBool();
     ServerStatCache = server["StatCache"].getBool(true);
+    server["WarmupRequests"].get(ServerWarmupRequests);
     RequestTimeoutSeconds = server["RequestTimeoutSeconds"].getInt32(0);
     ServerMemoryHeadRoom = server["MemoryHeadRoom"].getInt64(0);
     RequestMemoryMaxBytes = server["RequestMemoryMaxBytes"].getInt64(INT64_MAX);
@@ -832,7 +849,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     UseSmallArray = server["UseSmallArray"].getBool(false);
 
     UseVectorArray = server["UseVectorArray"].getBool(true);
-    StrictCollections = server["StrictCollections"].getBool(false);
+    StrictCollections = server["StrictCollections"].getBool(true);
     WarnOnCollectionToArray = server["WarnOnCollectionToArray"].getBool(false);
     UseDirectCopy = server["UseDirectCopy"].getBool(false);
     AlwaysUseRelativePath = server["AlwaysUseRelativePath"].getBool(false);
@@ -999,7 +1016,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
   }
   {
     Hdf admin = config["AdminServer"];
-    AdminServerPort = admin["Port"].getInt16(8088);
+    AdminServerPort = admin["Port"].getInt16(0);
     AdminThreadCount = admin["ThreadCount"].getInt32(1);
     AdminPassword = admin["Password"].getString();
     admin["Passwords"].get(AdminPasswords);
@@ -1046,17 +1063,12 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     ClearInputOnSuccess = debug["ClearInputOnSuccess"].getBool(true);
     ProfilerOutputDir = debug["ProfilerOutputDir"].getString("/tmp");
     CoreDumpEmail = debug["CoreDumpEmail"].getString();
-    if (!CoreDumpEmail.empty()) {
-      StackTrace::ReportEmail = CoreDumpEmail;
-    }
     CoreDumpReport = debug["CoreDumpReport"].getBool(true);
     if (CoreDumpReport) {
-      StackTrace::InstallReportOnErrors();
+      install_crash_reporter();
     }
-    std::string reportDirectory = debug["CoreDumpReportDirectory"].getString();
-    if (!reportDirectory.empty()) {
-      StackTraceBase::ReportDirectory = reportDirectory;
-    }
+    CoreDumpReportDirectory =
+      debug["CoreDumpReportDirectory"].getString(CoreDumpReportDirectory);
     LocalMemcache = debug["LocalMemcache"].getBool();
     MemcacheReadOnly = debug["MemcacheReadOnly"].getBool();
 
@@ -1190,6 +1202,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     EvalJitMGeneric = eval["JitMGeneric"].getBool(true);
     EvalJitUseIR = eval["JitUseIR"].getBool(false);
     EvalIRPuntDontInterp = eval["IRPuntDontInterp"].getBool(false);
+    EvalHHIRGenericDtorHelper = eval["HHIRGenericDtorHelper"].getBool(true);
     EvalHHIRMemOpt = eval["HHIRMemOpt"].getBool(true);
     EvalHHIRNumFreeRegs = eval["HHIRNumFreeRegs"].getUInt32(-1);
     EvalHHIREnableRematerialization = eval["HHIREnableRematerialization"].getBool(true);
@@ -1203,6 +1216,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     EvalHHIRDirectExit = eval["HHIRDirectExit"].getBool(true);
     EvalMaxHHIRTrans = eval["MaxHHIRTrans"].getUInt64(-1);
     EnableEmitSwitch = eval["EnableEmitSwitch"].getBool(!EvalJitUseIR);
+    EnableEmitterStats = eval["EnableEmitterStats"].getBool(EnableEmitterStats);
     EvalDumpBytecode = eval["DumpBytecode"].getBool(false);
     EvalDumpIR = eval["DumpIR"].getUInt32(0);
     EvalDumpTC = eval["DumpTC"].getBool(false);
@@ -1216,6 +1230,9 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
     }
     if (RecordCodeCoverage) CheckSymLink = true;
     CodeCoverageOutputFile = eval["CodeCoverageOutputFile"].getString();
+    VMTranslASize = eval["JitASize"].getUInt64(VMTranslASize);
+    VMTranslAStubsSize = eval["JitAStubsSize"].getUInt64(VMTranslAStubsSize);
+    VMTranslGDataSize = eval["JitGlobalDataSize"].getUInt64(VMTranslGDataSize);
     {
       Hdf debugger = eval["Debugger"];
       EnableDebugger = debugger["EnableDebugger"].getBool();
@@ -1281,6 +1298,7 @@ void RuntimeOption::Load(Hdf &config, StringVec *overwrites /* = NULL */,
         RepoEvalMode = "readonly";
       }
     }
+    RepoJournal = repo["Journal"].getString("delete");
     RepoCommit = repo["Commit"].getBool(true);
     RepoDebugInfo = repo["DebugInfo"].getBool(true);
     RepoAuthoritative = repo["Authoritative"].getBool(false);

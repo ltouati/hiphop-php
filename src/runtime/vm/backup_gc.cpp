@@ -21,7 +21,7 @@
 #include <boost/noncopyable.hpp>
 #include <map>
 
-#include "util/assert.h"
+#include "util/assertions.h"
 #include "util/timer.h"
 #include "util/trace.h"
 #include "runtime/base/execution_context.h"
@@ -366,7 +366,7 @@ struct ExternalRefRestorer {
 struct StringDealloc {
   static const bool visits_strings = true;
 
-  void operator()(StringData* s) const { LITSTR_DECREF(s); }
+  void operator()(StringData* s) const { decRefStr(s); }
   template<class T> void operator()(T*) const {}
 };
 

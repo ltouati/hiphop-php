@@ -104,7 +104,7 @@ void SrcRec::newTranslation(Asm& a, Asm &astubs, TCA newStart) {
    * translation possibly for this same situation.)
    */
   for (size_t i = 0; i < m_tailFallbackJumps.size(); ++i) {
-    Asm& as = Asm::Choose(a, astubs, m_tailFallbackJumps[i].m_src);
+    auto& as = asmChoose(m_tailFallbackJumps[i].m_src, a, astubs);
     patch(&as, m_tailFallbackJumps[i], newStart);
   }
 
@@ -135,7 +135,7 @@ void SrcRec::patchIncomingBranches(Asm& a, Asm &astubs, TCA newStart) {
     // We have a debugger guard, so all jumps to us funnel through
     // this.  Just smash m_dbgBranchGuardSrc.
     TRACE(1, "smashing m_dbgBranchGuardSrc @%p\n", m_dbgBranchGuardSrc);
-    TranslatorX64::smash(a, m_dbgBranchGuardSrc, newStart);
+    TranslatorX64::smashJmp(a, m_dbgBranchGuardSrc, newStart);
     return;
   }
 
@@ -146,7 +146,7 @@ void SrcRec::patchIncomingBranches(Asm& a, Asm &astubs, TCA newStart) {
     TRACE(1, "SrcRec(%p)::newTranslation rechaining @%p -> %p\n",
           this, change[i].m_src, newStart);
     Asm *as = change[i].m_type == IncomingBranch::ADDR ?
-      NULL : &Asm::Choose(a, astubs, change[i].m_src);
+      NULL : &asmChoose(change[i].m_src, a, astubs);
     patch(as, change[i], newStart);
   }
 }
@@ -171,7 +171,7 @@ void SrcRec::patch(Asm* a, IncomingBranch branch, TCA dest) {
   switch(branch.m_type) {
     case IncomingBranch::JMP: {
       CodeCursor cg(*a, branch.m_src);
-      TranslatorX64::smash(*a, branch.m_src, dest);
+      TranslatorX64::smashJmp(*a, branch.m_src, dest);
       break;
     }
     case IncomingBranch::JCC: {

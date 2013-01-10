@@ -152,6 +152,16 @@ void AnalysisResult::parseOnDemand(const std::string &name) const {
   }
 }
 
+void AnalysisResult::parseOnDemandBy(const string &name,
+                                     const map<string,string> &amap) const {
+  if (m_package) {
+    auto it = amap.find(name);
+    if (it != amap.end()) {
+      parseOnDemand(Option::AutoloadRoot + it->second);
+    }
+  }
+}
+
 FileScopePtr AnalysisResult::findFileScope(const std::string &name) const {
   StringToFileScopePtrMap::const_iterator iter = m_files.find(name);
   if (iter != m_files.end()) {
@@ -659,7 +669,7 @@ void AnalysisResult::analyzeProgram(bool system /* = false */) {
       if (!func->hasImpl() && needAbstractMethodImpl) {
         FunctionScopePtr tmpFunc =
           cls->findFunction(ar, func->getName(), true, true);
-        assert(!tmpFunc || !tmpFunc->hasImpl());
+        always_assert(!tmpFunc || !tmpFunc->hasImpl());
         Compiler::Error(Compiler::MissingAbstractMethodImpl,
                         func->getStmt(), cls->getStmt());
       }
@@ -918,7 +928,7 @@ public:
       {
         Lock ldep(BlockScope::s_depsMutex);
         Lock lstate(BlockScope::s_jobStateMutex);
-        assert(scope->getMark() == BlockScope::MarkReady);
+        always_assert(scope->getMark() == BlockScope::MarkReady);
         if (scope->getNumDepsToWaitFor()) {
           scope->setMark(BlockScope::MarkWaiting);
           return;
@@ -1011,13 +1021,13 @@ public:
                 atomic_inc(AnalysisResult::s_NumReactivateUseKinds);
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
                 bool ready = visitor->activateScope(pf->first);
-                assert(!ready);
+                always_assert(!ready);
                 m = BlockScope::MarkWaiting;
               }
 
               if (m == BlockScope::MarkWaiting || m == BlockScope::MarkReady) {
                 int nd = pf->first->getNumDepsToWaitFor();
-                assert(nd >= 1);
+                always_assert(nd >= 1);
                 if (!pf->first->decNumDepsToWaitFor() &&
                     m == BlockScope::MarkWaiting) {
                   pf->first->setMark(BlockScope::MarkReady);
@@ -1034,7 +1044,7 @@ public:
 #ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
                 atomic_inc(AnalysisResult::s_NumForceRerunUseKinds);
 #endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
-                assert(pf->first->getNumDepsToWaitFor() == 0);
+                always_assert(pf->first->getNumDepsToWaitFor() == 0);
                 pf->first->setForceRerun(true);
               }
             }
@@ -1052,7 +1062,7 @@ public:
               if (*p.second & GetPhaseInterestMask<When>()) {
                 if (p.first->getMark() == BlockScope::MarkProcessing) {
                   bool ready = visitor->activateScope(BlockScopeRawPtr(scope));
-                  assert(!ready);
+                  always_assert(!ready);
                   break;
                 }
               }
@@ -1337,7 +1347,7 @@ int DepthFirstVisitor<Pre, OptVisitor>::visitScope(BlockScopeRawPtr scope) {
         }
       } else {
         StatementPtr rep = this->visitStmtRecur(stmt);
-        assert(!rep);
+        always_assert(!rep);
       }
       updates = scope->getUpdated();
       all_updates |= updates;
@@ -1352,7 +1362,7 @@ int DepthFirstVisitor<Pre, OptVisitor>::visitScope(BlockScopeRawPtr scope) {
   do {
     scope->clearUpdated();
     StatementPtr rep = this->visitStmtRecur(stmt);
-    assert(!rep);
+    always_assert(!rep);
     updates = scope->getUpdated();
     all_updates |= updates;
   } while (updates);
@@ -1570,7 +1580,7 @@ int DepthFirstVisitor<Post, OptVisitor>::visit(BlockScopeRawPtr scope) {
 
   if (!done) {
     StatementPtr rep = this->visitStmtRecur(stmt);
-    assert(!rep);
+    always_assert(!rep);
   }
 
   return scope->getUpdated();
@@ -1682,7 +1692,7 @@ int AnalysisResult::registerScalarArray(bool insideScalarArray,
       if (strings[i] == text) break;
     }
     if (i == strings.size()) {
-      assert(!found);
+      always_assert(!found);
       strings.push_back(text);
     }
     index = i;
@@ -1694,14 +1704,14 @@ int AnalysisResult::registerScalarArray(bool insideScalarArray,
 int AnalysisResult::checkScalarArray(const string &text, int &index) {
   Lock lock(m_namedScalarArraysMutex);
 
-  assert(Option::ScalarArrayOptimization && Option::UseNamedScalarArray);
+  always_assert(Option::ScalarArrayOptimization && Option::UseNamedScalarArray);
   int hash = hash_string_cs(text.data(), text.size());
   vector<string> &strings = m_namedScalarArrays[hash];
   unsigned int i = 0;
   for (; i < strings.size(); i++) {
     if (strings[i] == text) break;
   }
-  assert(i < strings.size());
+  always_assert(i < strings.size());
   index = i;
   return hash;
 }
@@ -1710,7 +1720,7 @@ int AnalysisResult::getScalarArrayId(const string &text) {
   Lock lock(m_namedScalarArraysMutex);
 
   std::map<std::string, int>::const_iterator iter = m_scalarArrays.find(text);
-  assert(iter != m_scalarArrays.end());
+  always_assert(iter != m_scalarArrays.end());
   return iter->second;
 }
 
@@ -1795,7 +1805,7 @@ void AnalysisResult::outputCPPNamedScalarVarIntegers(const std::string &file) {
   }
   cg_printf("\n");
   cg.namespaceBegin();
-  assert((sizeof(VarNR) % sizeof(int64) == 0));
+  always_assert((sizeof(VarNR) % sizeof(int64) == 0));
   int multiple = (sizeof(VarNR) / sizeof(int64));
   cg_indentBegin("static const uint64 ivalues[] = {\n");
   for (map<int, vector<string> >::const_iterator it =
@@ -1862,8 +1872,8 @@ void AnalysisResult::outputCPPNamedScalarVarDoubles(const std::string &file) {
   }
   cg_printf("\n");
   cg.namespaceBegin();
-  assert((sizeof(int64) == sizeof(double)));
-  assert((sizeof(VarNR) % sizeof(double) == 0));
+  always_assert((sizeof(int64) == sizeof(double)));
+  always_assert((sizeof(VarNR) % sizeof(double) == 0));
   int multiple = (sizeof(VarNR) / sizeof(double));
   cg_indentBegin("static const uint64 dvalues[] = {\n");
   for (map<int, vector<string> >::const_iterator it =
@@ -1910,7 +1920,7 @@ void AnalysisResult::addInteger(int64 n) {
 int AnalysisResult::checkScalarVarInteger(int64 val, int &index) {
   Lock lock(m_namedScalarVarIntegersMutex);
 
-  assert(Option::UseScalarVariant);
+  always_assert(Option::UseScalarVariant);
   int hash = hash_int64(val);
   vector<string> &integers = m_namedScalarVarIntegers[hash];
   unsigned int i = 0;
@@ -1931,7 +1941,7 @@ string AnalysisResult::getScalarVarIntegerName(int hash, int index) {
 int AnalysisResult::checkScalarVarDouble(double dval, int &index) {
   Lock lock(m_namedScalarVarDoublesMutex);
 
-  assert(Option::UseScalarVariant);
+  always_assert(Option::UseScalarVariant);
   int64 ival = *(int64*)(&dval);
   int hash = hash_int64(ival);
   vector<string> &integers = m_namedScalarVarDoubles[hash];
@@ -2419,7 +2429,7 @@ public:                                                             \
 DECLARE_JOB(DynamicTable, outputCPPDynamicTables(m_output));
 DECLARE_JOB(System,       outputCPPSystem());
 DECLARE_JOB(SepExtMake,   outputCPPSepExtensionMake());
-DECLARE_JOB(ClassMap,     outputCPPClassMapFile());
+DECLARE_JOB(ClassMap,     outputCPPClassMapFile(m_output));
 DECLARE_JOB(NameMaps,     outputCPPNameMaps());
 DECLARE_JOB(SourceInfos,  outputCPPSourceInfos());
 DECLARE_JOB(RTTIMeta,     outputRTTIMetaData(Option::RTTIOutputFile.c_str()));
@@ -2550,8 +2560,8 @@ void AnalysisResult::outputAllCPP(CodeGenerator::Output output,
     } else if (Option::GenerateCPPMain) {
       SCHEDULE_JOB(SepExtMake);
     }
+    SCHEDULE_JOB(ClassMap); // TODO(#1960978): eventually don't need this
     if (Option::GenerateCPPMacros && output != CodeGenerator::SystemCPP) {
-      SCHEDULE_JOB(ClassMap);
       SCHEDULE_JOB(NameMaps);
       SCHEDULE_JOB(SourceInfos);
     }
@@ -2654,7 +2664,7 @@ void AnalysisResult::outputCPPExtClassImpl(CodeGenerator &cg) {
     ar->getExtensionClasses(), true);
 }
 
-void AnalysisResult::outputCPPClassMapFile() {
+void AnalysisResult::outputCPPClassMapFile(CodeGenerator::Output output) {
   string filename = m_outputPath + "/" + Option::SystemFilePrefix +
     "class_map.cpp";
   Util::mkdir(filename);
@@ -2662,15 +2672,17 @@ void AnalysisResult::outputCPPClassMapFile() {
   CodeGenerator cg(&f, CodeGenerator::ClusterCPP);
   cg_printf("\n");
   cg_printInclude("<runtime/base/hphp.h>");
-  cg_printInclude(string(Option::SystemFilePrefix) + "global_variables.h");
-  if (Option::GenArrayCreate) {
-    cg_printInclude(string(Option::SystemFilePrefix) + "cpputil.h");
+  if (output != CodeGenerator::SystemCPP) {
+    cg_printInclude(string(Option::SystemFilePrefix) + "global_variables.h");
+    if (Option::GenArrayCreate) {
+      cg_printInclude(string(Option::SystemFilePrefix) + "cpputil.h");
+    }
   }
   cg_printf("\n");
 
   cg.printImplStarter();
   cg.namespaceBegin();
-  outputCPPClassMap(cg);
+  outputCPPClassMap(cg, output);
   cg.namespaceEnd();
   f.close();
 }
@@ -2893,7 +2905,7 @@ void AnalysisResult::outputCPPUtilImpl(CodeGenerator::Output output) {
     "}\n"
     "\n"
     "static int ATTRIBUTE_UNUSED initIntegers = precompute_integers();\n";
-  cg_printf(text);
+  cg_print(text);
 
   cg.namespaceEnd();
 }
@@ -3137,11 +3149,11 @@ void AnalysisResult::outputCPPHashTableInvokeFile(
   }
   cg_printf(text2, tableSize - 1, tableSize - 1);
   outputCPPInvokeFileHeader(cg);
-  cg_printf(text3);
+  cg_print(text3);
   if (needEvalHook) outputCPPEvalHook(cg);
   if (entries.size() == 1) outputCPPDefaultInvokeFile(cg, entries[0]);
   cg_indentEnd();
-  cg_printf(text4);
+  cg_print(text4);
 
   cg_printf("bool hphp_could_invoke_file(CStrRef s, void*) {\n"
             "  return findFile(s.c_str(), s->hash());\n"
@@ -3335,7 +3347,7 @@ void AnalysisResult::outputCPPHashTableGetConstant(
         cg_printf("(const char *)&%s,\n", varName.c_str());
         break;
       case Type::KindOfObject:
-        assert(system);
+        always_assert(system);
         if (strcmp(name, "STDERR") == 0) {
           cg_printf("(const char *)&BuiltinFiles::GetSTDERR,\n");
         } else if (strcmp(name, "STDIN") == 0) {
@@ -3353,7 +3365,7 @@ void AnalysisResult::outputCPPHashTableGetConstant(
     }
   }
   cg_printf(text2, tableSize - 1, tableSize - 1);
-  if (system) cg_printf(text3);
+  if (system) cg_print(text3);
 }
 
 void AnalysisResult::outputCPPDynamicConstantTable(
@@ -3386,7 +3398,7 @@ void AnalysisResult::outputCPPDynamicConstantTable(
       if (ct->isSystem(sym) && !system) continue;
       ClassScopePtr defClass;
       if (!ct->getDeclarationRecur(ar, sym, defClass)) {
-        assert(!defClass);
+        always_assert(!defClass);
         continue;
       }
       constMap[sym] = ct->getSymbol(sym)->getFinalType();
@@ -3411,8 +3423,8 @@ void AnalysisResult::outputCPPDynamicConstantTable(
     "}\n"
   };
   const char text2[] = {
-    "if (error) raise_notice(\"Use of undefined constant %%s - "
-    "assumed '%%s'\", s, s);\n"
+    "if (error) raise_notice(\"Use of undefined constant %s - "
+    "assumed '%s'\", s, s);\n"
     "return name;\n"
   };
   bool useHashTable = (constMap.size() > 0);
@@ -3433,7 +3445,7 @@ void AnalysisResult::outputCPPDynamicConstantTable(
     cg_printf("const hashNodeCon *p = findCon(name.data(), name->hash());\n");
     if (system) {
       cg_indentBegin("if (!p) {\n");
-      cg_printf(text2);
+      cg_print(text2);
       cg_indentEnd("}\n");
     } else {
       cg_printf("if (!p) return get_builtin_constant(name, error);\n");
@@ -3452,7 +3464,7 @@ void AnalysisResult::outputCPPDynamicConstantTable(
 
   if (!useHashTable) {
     if (system) {
-      cg_printf(text2);
+      cg_print(text2);
     } else {
       cg_printf("return get_builtin_constant(name, error);\n");
     }
@@ -3819,7 +3831,7 @@ void AnalysisResult::outputCPPScalarArrayInit(CodeGenerator &cg, int fileCount,
 string AnalysisResult::getHashedName(int64 hash, int index,
                                      const char *prefix,
                                      bool longName /* = false */) {
-  assert(index >= 0);
+  always_assert(index >= 0);
   string name(Option::ScalarPrefix);
   if (Option::SystemGen) name += Option::SysPrefix;
   name += prefix;
@@ -4370,7 +4382,8 @@ void AnalysisResult::outputCPPMain() {
   fMain.close();
 }
 
-void AnalysisResult::outputCPPClassMap(CodeGenerator &cg) {
+void AnalysisResult::outputCPPClassMap(CodeGenerator &cg,
+                                       CodeGenerator::Output cgOutput) {
   AnalysisResultPtr ar = shared_from_this();
 
   if (!Option::GenerateCPPMetaInfo) return;
@@ -4399,7 +4412,11 @@ void AnalysisResult::outputCPPClassMap(CodeGenerator &cg) {
     }
   }
 
-  cg_indentBegin("const char *g_class_map[] = {\n");
+  if (cgOutput == CodeGenerator::SystemCPP) {
+    cg_indentBegin("const char* g_system_class_map[] = {\n");
+  } else {
+    cg_indentBegin("const char *g_class_map[] = {\n");
+  }
 
   // system functions
   cg_printf("(const char *)ClassInfo::IsSystem, NULL, \"\","
@@ -4426,6 +4443,19 @@ void AnalysisResult::outputCPPClassMap(CodeGenerator &cg) {
   output = SymbolTable::getEscapedText(null, len);
   cg_printf("\"null\", (const char *)%d, \"%s\",\n",
             len, output.c_str());
+  if (cgOutput == CodeGenerator::SystemCPP) {
+    /*
+     * We need system constants to show up in the g_system_class_map
+     * for use in the hhvm build, even though they aren't necessarily
+     * loaded in our m_constants.
+     *
+     * Use an empty AnalysisResult so that all constants get output
+     * regardless of the ar->isConstantRedeclared check.
+     */
+    AnalysisResultPtr emptyAr(new AnalysisResult());
+    BuiltinSymbols::LoadSystemConstants()->
+      outputCPPClassMap(cg, emptyAr, false /* last */);
+  }
   m_constants->outputCPPClassMap(cg, ar);
 
   cg_printf("NULL,\n"); // attributes
@@ -5354,6 +5384,6 @@ void AnalysisResult::outputCPPSepExtensionImpl(const std::string &filename) {
   cg.namespaceEnd();
   fTable.close();
   outputCPPNamedLiteralStrings(true, litstrFile);
-  assert(m_scalarArrays.size() == 0);
+  always_assert(m_scalarArrays.size() == 0);
 }
 

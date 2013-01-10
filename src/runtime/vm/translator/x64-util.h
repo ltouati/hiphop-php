@@ -16,7 +16,7 @@
 #ifndef _X64_UTIL_H_
 #define _X64_UTIL_H_
 
-#include <runtime/vm/translator/asm-x64.h>
+#include <util/asm-x64.h>
 #include <runtime/vm/translator/translator-inline.h>
 
 namespace HPHP {
@@ -58,7 +58,7 @@ translator_debug_break(X64Assembler &a) {
  * the programmer to ensure that it really is a TLS address.
  */
 static inline void
-emitTLSLoad(X64Assembler& a, const void* datum, register_name_t reg) {
+emitTLSLoad(X64Assembler& a, const void* datum, RegNumber reg) {
   uintptr_t virtualAddress = uintptr_t(datum) - tlsBase();
   a.    fs();
   a.    load_disp32_reg64(virtualAddress, reg);
@@ -67,7 +67,7 @@ emitTLSLoad(X64Assembler& a, const void* datum, register_name_t reg) {
 template<typename T>
 static inline void
 emitTLSLoad(X64Assembler& a, const ThreadLocalNoCheck<T>& datum,
-            register_name_t reg) {
+            RegNumber reg) {
   emitTLSLoad(a, &datum.m_node.m_p, reg);
 }
 

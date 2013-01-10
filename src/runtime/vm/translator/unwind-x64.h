@@ -22,12 +22,12 @@
 #include <string>
 #include <boost/shared_ptr.hpp>
 
-#include "util/assert.h"
+#include "util/assertions.h"
 #include "runtime/base/types.h"
 #include "runtime/vm/translator/types.h"
 #include "runtime/vm/tread_hash_map.h"
 #include "runtime/vm/translator/types.h"
-#include "runtime/vm/translator/asm-x64.h"
+#include "util/asm-x64.h"
 #include "runtime/vm/translator/runtime-type.h"
 
 namespace HPHP { namespace VM { namespace Transl {
@@ -45,7 +45,7 @@ struct UnwindRegInfo {
   struct Data {
     bool     dirty     : 1;
     bool     exStack   : 1;  // false means a local
-    signed   dataType  : 5;  // DataType values
+    signed   dataType  : 8;  // DataType values
     unsigned reg       : 4;  // Register id
     int16_t  locOffset;
 
@@ -56,7 +56,7 @@ struct UnwindRegInfo {
 
   explicit UnwindRegInfo();
 
-  void add(register_name_t reg, DataType type, Location loc);
+  void add(RegNumber reg, DataType type, Location loc);
   void clear();
   bool empty() const;
 

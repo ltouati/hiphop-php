@@ -53,10 +53,7 @@ static StaticString s_serialize("serialize");
 // constructor/destructor
 
 ObjectData::~ObjectData() {
-  if (o_properties.get() && o_properties.get()->decRefCount() == 0) {
-    o_properties.get()->release();
-  }
-
+  if (ArrayData* a = o_properties.get()) decRefArr(a);
   int &pmax = *os_max_id;
   if (o_id && o_id == pmax) {
     --pmax;
@@ -712,7 +709,7 @@ ArrayIter ObjectData::begin(CStrRef context /* = null_string */) {
   }
   Object iterable = iterableObject(isIterable);
   if (isIterable) {
-    return ArrayIter(iterable.get());
+    return ArrayIter(iterable, ArrayIter::transferOwner);
   } else {
     return ArrayIter(iterable->o_toIterArray(context));
   }
@@ -1965,10 +1962,32 @@ struct FindIndex<NumObjectSizeClasses> {
   }
 };
 
+template<int Idx>
+struct FindSize {
+  static int run(int idx) {
+    if (idx == Idx) {
+      return ObjectSizeTable<Idx>::value;
+    }
+    return FindSize<Idx + 1>::run(idx);
+  }
+};
+
+template<>
+struct FindSize<NumObjectSizeClasses> {
+  static int run(int) {
+    not_reached();
+  }
+};
+
 }
 
 int object_alloc_size_to_index(size_t size) {
   return FindIndex<0>::run(size);
+}
+
+// This returns the maximum size for the size class
+size_t object_alloc_index_to_size(int idx) {
+  return FindSize<0>::run(idx);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -178,6 +178,10 @@ public:
   static std::vector<std::string> DynamicClassPostfixes;
   static std::set<std::string> DynamicInvokeFunctions;
   static std::set<std::string> VolatileClasses;
+  static std::map<std::string,std::string> AutoloadClassMap;
+  static std::map<std::string,std::string> AutoloadFuncMap;
+  static std::map<std::string,std::string> AutoloadConstMap;
+  static std::string AutoloadRoot;
 
   /**
    * CodeGenerator options for HHBC.
@@ -340,6 +344,7 @@ public:
   static bool ParseTimeOpts;
   static bool OutputHHBC;
   static bool EnableHipHopSyntax;
+  static bool JitEnableRenameFunction;
   static bool EnableHipHopExperimentalSyntax;
   static bool EnableShortTags;
   static bool EnableAspTags;

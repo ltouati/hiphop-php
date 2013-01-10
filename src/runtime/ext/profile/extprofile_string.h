@@ -55,7 +55,7 @@ inline String x_bin2hex(CStrRef str) {
   return f_bin2hex(str);
 }
 
-inline String x_hex2bin(CStrRef str) {
+inline Variant x_hex2bin(CStrRef str) {
   FUNCTION_INJECTION_BUILTIN(hex2bin);
   TAINT_OBSERVER(TAINT_BIT_MUTATED, TAINT_BIT_NONE);
   return f_hex2bin(str);
@@ -505,7 +505,7 @@ inline Variant x_strcspn(CStrRef str1, CStrRef str2, int start = 0, int length =
   return f_strcspn(str1, str2, start, length);
 }
 
-inline int64 x_strlen(CStrRef str) {
+inline Variant x_strlen(CVarRef str) {
   FUNCTION_INJECTION_BUILTIN(strlen);
   return f_strlen(str);
 }

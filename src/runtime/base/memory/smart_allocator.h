@@ -62,6 +62,7 @@ inline void smart_allocator_check_type() {
 #define NEWOBJ(T) new T
 #define NEWOBJSZ(T,SZ) new (malloc(SZ)) T
 #define ALLOCOBJSZ(SZ) (malloc(SZ))
+#define ALLOCOBJIDX(I) (malloc(object_alloc_index_to_size(I)))
 #define DELETE(T) delete
 #define DELETEOBJSZ(SZ) free
 #define DELETEOBJ(NS,T,OBJ) delete OBJ
@@ -77,6 +78,8 @@ inline void smart_allocator_check_type() {
   new ((smart_allocator_check_type<T>(), info->instanceSizeAllocator(SZ))) T
 #define ALLOCOBJSZ(SZ) (ThreadInfo::s_threadInfo.getNoCheck()->\
                         instanceSizeAllocator(SZ)->alloc())
+#define ALLOCOBJIDX(I) (ThreadInfo::s_threadInfo.getNoCheck()-> \
+                        instanceIdxAllocator(I)->alloc())
 #define DELETE(T) T::AllocatorType::getNoCheck()->release
 #define DELETEOBJSZ(SZ) (ThreadInfo::s_threadInfo.getNoCheck()->\
                          instanceSizeAllocator(SZ)->release)
@@ -144,9 +147,19 @@ class SmartAllocatorImpl : boost::noncopyable {
 public:
   enum Name {
     TestAllocator = -1,
-#define SMART_ALLOCATOR_ENTRY(x) x,
-#include "runtime/base/memory/smart_allocator.inc_gen"
-#undef SMART_ALLOCATOR_ENTRY
+    RefData,
+    StringData,
+    SharedMap,
+    VectorArray,
+    Variant,
+    Bucket,
+    ZendArray,
+    HphpArray,
+    ObjectData,
+    GlobalVariables,
+    TaintTraceNode,
+    TaintTraceData,
+    TestGlobals
   };
 
   struct Iterator;

@@ -31,7 +31,6 @@ extern bool has_eval_support;
 
 const String null_string = String();
 const StaticString empty_string("");
-StringData* empty_string_data(empty_string.get());
 
 ///////////////////////////////////////////////////////////////////////////////
 // statics
@@ -39,12 +38,12 @@ StringData* empty_string_data(empty_string.get());
 #define NUM_CONVERTED_INTEGERS \
   (String::MaxPrecomputedInteger - String::MinPrecomputedInteger + 1)
 
-StringData *String::converted_integers_raw;
-StringData *String::converted_integers;
+StringData const **String::converted_integers_raw;
+StringData const **String::converted_integers;
 
 String::IntegerStringDataMap String::integer_string_data_map;
 
-const StringData *convert_integer_helper(int64 n, StringData *sd) {
+static const StringData *convert_integer_helper(int64 n) {
   char tmpbuf[21];
   char *p;
   int is_negative;
@@ -52,33 +51,36 @@ const StringData *convert_integer_helper(int64 n, StringData *sd) {
 
   tmpbuf[20] = '\0';
   p = conv_10(n, &is_negative, &tmpbuf[20], &len);
-  if (sd) {
-    new (sd) StringData(p, len, CopyMalloc);
-  } else {
-    sd = new StringData(p, len, CopyMalloc);
-  }
-  sd->setStatic();
-  if (!String(sd).checkStatic()) {
-    StaticString::TheStaticStringSet().insert(sd);
-  }
-  return sd;
+  return StringData::GetStaticString(p);
 }
 
 void String::PreConvertInteger(int64 n) {
   IntegerStringDataMap::const_iterator it =
     integer_string_data_map.find(n);
   if (it != integer_string_data_map.end()) return;
-  integer_string_data_map[n] = convert_integer_helper(n, NULL);
+  integer_string_data_map[n] = convert_integer_helper(n);
+}
+
+const StringData *String::ConvertInteger(int64 n) {
+  StringData const **psd = converted_integers + n;
+  const StringData *sd = convert_integer_helper(n);
+  *psd = sd;
+  return sd;
 }
 
 static int precompute_integers() ATTRIBUTE_COLD;
 static int precompute_integers() {
   String::converted_integers_raw =
-    (StringData *)malloc(NUM_CONVERTED_INTEGERS * sizeof(StringData));
-  String::converted_integers = String::converted_integers_raw - SCHAR_MIN;
-  for (int n = SCHAR_MIN; n < 65536; n++) {
-    StringData *sd = String::converted_integers + n;
-    convert_integer_helper(n, sd);
+    (StringData const **)calloc(NUM_CONVERTED_INTEGERS, sizeof(StringData*));
+  String::converted_integers = String::converted_integers_raw
+    - String::MinPrecomputedInteger;
+  if (RuntimeOption::serverExecutionMode()) {
+    // Proactively populate, in order to increase cache locality for sequential
+    // access patterns.
+    for (int n = String::MinPrecomputedInteger;
+         n <= String::MaxPrecomputedInteger; n++) {
+      String::ConvertInteger(n);
+    }
   }
   return NUM_CONVERTED_INTEGERS;
 }
@@ -306,9 +308,7 @@ char String::charAt(int pos) const {
 // assignments
 
 String &String::operator=(litstr s) {
-  if (m_px && m_px->decRefCount() == 0) {
-    m_px->release();
-  }
+  if (m_px) decRefStr(m_px);
   if (s) {
     m_px = NEW(StringData)(s, AttachLiteral);
     m_px->setRefCount(1);
@@ -324,9 +324,7 @@ String &String::operator=(StringData *data) {
 }
 
 String &String::operator=(const std::string & s) {
-  if (m_px && m_px->decRefCount() == 0) {
-    m_px->release();
-  }
+  if (m_px) decRefStr(m_px);
   m_px = NEW(StringData)(s.c_str(), s.size(), CopyString);
   m_px->setRefCount(1);
   return *this;
@@ -355,7 +353,7 @@ String &String::operator+=(litstr s) {
     } else {
       StringData* px = NEW(StringData)(m_px, s);
       px->setRefCount(1);
-      if (m_px->decRefCount() == 0) m_px->release();
+      decRefStr(m_px);
       m_px = px;
     }
   }
@@ -370,7 +368,7 @@ String &String::operator+=(CStrRef str) {
       m_px->append(str.slice());
     } else {
       StringData* px = NEW(StringData)(m_px, str.slice());
-      if (m_px->decRefCount() == 0) m_px->release();
+      decRefStr(m_px);
       px->setRefCount(1);
       m_px = px;
     }
@@ -425,9 +423,7 @@ String &String::operator|=(CStrRef v) {
     copy = string_duplicate(s1, len1);
     for (int i = 0; i < len2; i++) copy[i] |= s2[i];
   }
-  if (m_px && m_px->decRefCount() == 0) {
-    m_px->release();
-  }
+  if (m_px) decRefStr(m_px);
   m_px = NEW(StringData)(copy, len, AttachString);
   m_px->setRefCount(1);
   return *this;
@@ -449,9 +445,7 @@ String &String::operator&=(CStrRef v) {
     copy = string_duplicate(s1, len1);
     for (int i = 0; i < len1; i++) copy[i] &= s2[i];
   }
-  if (m_px && m_px->decRefCount() == 0) {
-    m_px->release();
-  }
+  if (m_px) decRefStr(m_px);
   m_px = NEW(StringData)(copy, len, AttachString);
   m_px->setRefCount(1);
   return *this;
@@ -473,9 +467,7 @@ String &String::operator^=(CStrRef v) {
     copy = string_duplicate(s1, len1);
     for (int i = 0; i < len1; i++) copy[i] ^= s2[i];
   }
-  if (m_px && m_px->decRefCount() == 0) {
-    m_px->release();
-  }
+  if (m_px) decRefStr(m_px);
   m_px = NEW(StringData)(copy, len, AttachString);
   m_px->setRefCount(1);
   return *this;
@@ -689,9 +681,7 @@ void String::unserialize(VariableUnserializer *uns,
   ASSERT(size <= buf.len);
   uns->read(buf.ptr, size);
   px->setSize(size);
-  if (m_px && m_px->decRefCount() == 0) {
-    m_px->release();
-  }
+  if (m_px) decRefStr(m_px);
   m_px = px;
   px->setRefCount(1);
 
@@ -813,9 +803,6 @@ StringDataSet &StaticString::TheStaticStringSet() {
 }
 
 void StaticString::FinishInit() {
-  if (has_eval_support) {
-    ASSERT(s_stringSet->size() == NUM_CONVERTED_INTEGERS);
-  }
   // release the memory
   StringDataSet empty;
   s_stringSet->swap(empty);

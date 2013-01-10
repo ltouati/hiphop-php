@@ -14,11 +14,11 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef _CG_H_
-#define _CG_H_
+#ifndef incl_HPHP_VM_CG_H_
+#define incl_HPHP_VM_CG_H_
 
 #include <vector>
-#include "ir.h"
+#include "runtime/vm/translator/hopt/ir.h"
 #include "runtime/vm/translator/targetcache.h"
 #include <runtime/vm/translator/translator-x64.h>
 
@@ -42,16 +42,19 @@ void cgPunt(const char* _file, int _line, const char* _func);
 
 #define CG_PUNT(instr) do {                                            \
   if (tx64) {                                                          \
-    cgPunt( __FILE__, __LINE__, __func__);                             \
+    cgPunt( __FILE__, __LINE__, #instr);                               \
   }                                                                    \
 } while(0)
 
 struct ArgGroup;
 
+enum SyncOptions {
+  kNoSyncPoint,
+  kSyncPoint
+};
+
 class CodeGenerator {
 public:
-  static const register_name_t argNumToRegName[];
-
   // typedef copied from TranslatorX64 class
   typedef Transl::X64Assembler Asm;
   CodeGenerator(Asm& as, Asm& astubs, Transl::TranslatorX64* tx64) :
@@ -59,44 +62,47 @@ public:
       m_curInst(NULL), m_lastMarker(NULL), m_curTrace(NULL) {
   }
 
-  void cgTrace(Trace*);
+  void cgTrace(Trace* trace, vector<TransBCMapping>* bcMap);
 
   Address cgBreakpoint(X64Assembler &a);
 
   Address cgInst(IRInstruction* inst);
 
   // Autogenerate function declarations for each IR instruction in ir.h
-
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef,  \
-            prodRef, mayModRefs, rematerializable, error)               \
-  Address cg ## name (IRInstruction* inst);
+#define OPC(name, flags) Address cg##name(IRInstruction* inst);
   IR_OPCODES
-  #undef OPC
-
+#undef OPC
 
   // helper functions for code generation
   Address cgCallHelper(Asm& a,
                        TCA addr,
-                       register_name_t dstReg,
-                       bool doRecordSyncPoint,
+                       PhysReg dstReg,
+                       SyncOptions sync,
                        ArgGroup& args);
   Address cgCallHelper(Asm&,
                        TCA addr,
                        SSATmp* dst,
-                       bool doRecordSyncPoint,
+                       SyncOptions sync,
                        ArgGroup& args);
 
-  Address cgStore(register_name_t base,
+  Address cgStore(PhysReg base,
                   int64_t off,
                   SSATmp* src,
                   bool genStoreType = true);
-  Address cgStoreCell(register_name_t base, int64_t off, SSATmp* src);
+  Address cgStoreTypedValue(PhysReg base, int64_t off, SSATmp* src);
 
   Address cgLoad(Type::Tag type,
                  SSATmp* dst,
-                 register_name_t base,
+                 PhysReg base,
                  int64_t off,
-                 LabelInstruction* label);
+                 LabelInstruction* label,
+                 IRInstruction* inst = NULL);
+
+  Address cgGuardType(Type::Tag         type,
+                      PhysReg           baseReg,
+                      int64_t           offset,
+                      LabelInstruction* label,
+                      IRInstruction*    instr);
 
   Address cgStMemWork(IRInstruction* inst, bool genStoreType);
   Address cgStRefWork(IRInstruction* inst, bool genStoreType);
@@ -123,51 +129,57 @@ public:
                          SSATmp* objOrCls,
                          SSATmp* nArgs,
                          SSATmp* magicName);
-  Address cgLoadCell(Type::Tag type,
-                     SSATmp* dst,
-                     register_name_t base,
-                     int64_t off,
-                     LabelInstruction* label);
+  Address cgLoadTypedValue(Type::Tag type,
+                           SSATmp* dst,
+                           PhysReg base,
+                           int64_t off,
+                           LabelInstruction* label,
+                           IRInstruction* inst);
 
   Address cgNegate(IRInstruction* inst); // helper
   Address cgJcc(IRInstruction* inst); // helper
-  Address cgLabel(Opcode opc, LabelInstruction* label);
-  Address cgOpEqHelper(IRInstruction* inst, bool eq);
-  Address cgOpSameHelper(IRInstruction* inst, bool eq);
+  Address cgOpCmpHelper(
+            IRInstruction* inst,
+            void (Asm::*setter)(Reg8),
+            int64 (*str_cmp_str)(StringData*, StringData*),
+            int64 (*str_cmp_int)(StringData*, int64),
+            int64 (*str_cmp_obj)(StringData*, ObjectData*),
+            int64 (*obj_cmp_obj)(ObjectData*, ObjectData*),
+            int64 (*obj_cmp_int)(ObjectData*, int64),
+            int64 (*arr_cmp_arr)(ArrayData*, ArrayData*));
   Address cgJmpZeroHelper(IRInstruction* inst, ConditionCode cc);
 
 
 private:
   void emitTraceCall(CodeGenerator::Asm& as, int64 pcOff);
-  void emitTraceRet(CodeGenerator::Asm& as, register_name_t retAddrReg);
+  void emitTraceRet(CodeGenerator::Asm& as);
   Address emitCheckStack(CodeGenerator::Asm& as, SSATmp* sp, uint32 numElems,
                          bool allocActRec);
   Address emitCheckCell(CodeGenerator::Asm& as,
                         SSATmp* sp,
                         uint32 index);
-  uint32 cgTrace(Trace*, uint32 liveRegs);
   Address cgCheckStaticBit(Type::Tag type,
-                           register_name_t reg,
+                           PhysReg reg,
                            bool regIsCount);
   Address cgCheckStaticBitAndDecRef(Type::Tag type,
-                                    register_name_t dataReg,
+                                    PhysReg dataReg,
                                     LabelInstruction* exit);
-  Address cgCheckRefCountedType(register_name_t typeReg);
-  Address cgCheckRefCountedType(register_name_t baseReg,
+  Address cgCheckRefCountedType(PhysReg typeReg);
+  Address cgCheckRefCountedType(PhysReg baseReg,
                                 int64 offset);
   Address cgDecRefStaticType(Type::Tag type,
-                             register_name_t dataReg,
+                             PhysReg dataReg,
                              LabelInstruction* exit,
                              bool genZeroCheck);
-  Address cgDecRefDynamicType(register_name_t typeReg,
-                              register_name_t dataReg,
+  Address cgDecRefDynamicType(PhysReg typeReg,
+                              PhysReg dataReg,
                               LabelInstruction* exit,
                               bool genZeroCheck);
-  Address cgDecRefDynamicTypeMem(register_name_t baseReg,
+  Address cgDecRefDynamicTypeMem(PhysReg baseReg,
                                  int64 offset,
                                  LabelInstruction* exit);
   Address cgDecRefMem(Type::Tag type,
-                      register_name_t baseReg,
+                      PhysReg baseReg,
                       int64 offset,
                       LabelInstruction* exit);
 
@@ -180,7 +192,10 @@ private:
                               SSATmp* toSmash);
   Address emitSmashableFwdJcc(ConditionCode cc, LabelInstruction* label,
                               SSATmp* toSmash);
-  int getLiveOutRegsToSave(register_name_t dstReg);
+  void emitGuardOrFwdJcc(IRInstruction*    inst,
+                         ConditionCode     cc,
+                         LabelInstruction* label);
+  Address emitContVarEnvHelperCall(SSATmp* fp, TCA helper);
   const Func* getCurrFunc();
   void recordSyncPoint(Asm& as);
   Address getDtor(DataType type);
@@ -204,17 +219,17 @@ class ArgDesc {
 public:
   enum Kind { Reg, Imm, Addr };
 
-  register_name_t getDstReg() const { return m_dstReg; }
-  register_name_t getSrcReg() const { return m_srcReg; }
+  PhysReg getDstReg() const { return m_dstReg; }
+  PhysReg getSrcReg() const { return m_srcReg; }
   Kind getKind() const { return m_kind; }
-  void setDstReg(register_name_t reg) { m_dstReg = reg; }
+  void setDstReg(PhysReg reg) { m_dstReg = reg; }
   Address genCode(CodeGenerator::Asm& as) const;
-  uintptr_t getImm() const { return m_imm; }
+  Immed getImm() const { return m_imm; }
 
 private: // These should be created using ArgGroup.
   friend struct ArgGroup;
 
-  explicit ArgDesc(Kind kind, register_name_t srcReg, uintptr_t immVal)
+  explicit ArgDesc(Kind kind, PhysReg srcReg, Immed immVal)
     : m_kind(kind)
     , m_srcReg(srcReg)
     , m_dstReg(reg::noreg)
@@ -225,9 +240,9 @@ private: // These should be created using ArgGroup.
 
 private:
   Kind m_kind;
-  register_name_t m_srcReg;
-  register_name_t m_dstReg;
-  uintptr_t m_imm;
+  PhysReg m_srcReg;
+  PhysReg m_dstReg;
+  Immed m_imm;
 };
 
 /*
@@ -251,7 +266,7 @@ struct ArgGroup {
   }
 
   ArgGroup& imm(uintptr_t imm) {
-    m_args.push_back(ArgDesc(ArgDesc::Imm, reg::noreg, imm));
+    m_args.push_back(ArgDesc(ArgDesc::Imm, InvalidReg, imm));
     return *this;
   }
 
@@ -259,23 +274,31 @@ struct ArgGroup {
     return imm(uintptr_t(ptr));
   }
 
-  ArgGroup& reg(register_name_t reg) {
-    m_args.push_back(ArgDesc(ArgDesc::Reg, reg, -1));
+  ArgGroup& reg(PhysReg reg) {
+    m_args.push_back(ArgDesc(ArgDesc::Reg, PhysReg(reg), -1));
     return *this;
   }
 
   ArgGroup& type(Type::Tag tag) {
-    m_args.push_back(ArgDesc(ArgDesc::Imm, reg::noreg, Type::toDataType(tag)));
+    m_args.push_back(ArgDesc(ArgDesc::Imm, InvalidReg,
+                             Type::toDataType(tag)));
     return *this;
   }
 
-  ArgGroup& addr(register_name_t base, uintptr_t off) {
-    m_args.push_back(ArgDesc(ArgDesc::Addr, base, off));
+  ArgGroup& addr(PhysReg base, uintptr_t off) {
+    m_args.push_back(ArgDesc(ArgDesc::Addr, PhysReg(base), off));
     return *this;
   }
 
   ArgGroup& ssa(SSATmp* tmp) {
     m_args.push_back(ArgDesc(tmp));
+    return *this;
+  }
+
+  ArgGroup& ssas(IRInstruction* inst, unsigned begin, unsigned count) {
+    for (unsigned i = begin; i < (begin + count); ++i) {
+      m_args.push_back(ArgDesc(inst->getSrc(i)));
+    }
     return *this;
   }
 
@@ -289,18 +312,13 @@ private:
   std::vector<ArgDesc> m_args;
 };
 
-void genCodeForTrace(Trace*, IRFactory* irFactory);
-void genCodeForTrace(Trace* trace,
-                     CodeGenerator::Asm& a,
-                     CodeGenerator::Asm& astubs,
-                     IRFactory* irFactory,
-                     TranslatorX64* tx64 = NULL);
+void genCodeForTrace(Trace*                  trace,
+                     CodeGenerator::Asm&     a,
+                     CodeGenerator::Asm&     astubs,
+                     IRFactory*              irFactory,
+                     vector<TransBCMapping>* bcMap,
+                     TranslatorX64*          tx64);
 
-class TraceBuilder;
-void assignRegsForTrace(Trace* trace,
-                        IRFactory* irFactory,
-                        TraceBuilder* tracebuilder);
+}}}
 
-}}} // HPHP::VM::JIT
-
-#endif // _CG_H_
+#endif

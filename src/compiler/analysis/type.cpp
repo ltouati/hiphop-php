@@ -533,8 +533,8 @@ bool Type::isNoObjectInvolved() const {
 TypePtr Type::combinedArithmeticType(TypePtr t1, TypePtr t2) {
   KindOf kind = KindOfAny;
 
-  if (t1 && t1->is(Type::KindOfArray) ||
-      t2 && t2->is(Type::KindOfArray)) {
+  if ((t1 && t1->is(Type::KindOfArray)) ||
+      (t2 && t2->is(Type::KindOfArray))) {
     return TypePtr();
   }
 
@@ -636,9 +636,18 @@ DataType Type::getDataType() const {
   }
 }
 
+// This is similar to getDataType() except that it returns
+// HPHP::KindOfNull for KindOfVoid;
+DataType Type::getHhvmDataType() const {
+  switch (m_kindOf) {
+    case KindOfVoid:        return HPHP::KindOfNull;
+    default:                return getDataType();
+  }
+}
+
 void Type::outputCPPDecl(CodeGenerator &cg, AnalysisResultConstPtr ar,
                          BlockScopeRawPtr scope) {
-  cg_printf(getCPPDecl(ar, scope, &cg).c_str());
+  cg_print(getCPPDecl(ar, scope, &cg).c_str());
 }
 
 void Type::outputCPPFastObjectCast(CodeGenerator &cg,

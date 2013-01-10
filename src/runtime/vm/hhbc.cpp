@@ -17,6 +17,7 @@
 #include <runtime/ext/ext_variable.h>
 #include <runtime/vm/hhbc.h>
 #include <runtime/vm/unit.h>
+#include <runtime/vm/stats.h>
 #include <sstream>
 
 namespace HPHP {
@@ -34,6 +35,7 @@ int numImmediates(Opcode opcode) {
 #define ONE(...)   1
 #define TWO(...)   2
 #define THREE(...) 3
+#define FOUR(...)  4
 #define O(name, imm, unusedPop, unusedPush, unusedFlags) imm,
     OPCODES
 #undef O
@@ -41,6 +43,7 @@ int numImmediates(Opcode opcode) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
   };
   return values[opcode];
 }
@@ -48,12 +51,13 @@ int numImmediates(Opcode opcode) {
 ArgType immType(const Opcode opcode, int idx) {
   ASSERT(isValidOpcode(opcode));
   ASSERT(idx >= 0 && idx < numImmediates(opcode));
-  assert(idx < 3); // No opcodes have more than three immediates
+  always_assert(idx < 4); // No opcodes have more than four immediates
   static const int8_t arg0Types[] = {
 #define NA -1,
 #define ONE(a) a,
 #define TWO(a, b) a,
 #define THREE(a, b, c) a,
+#define FOUR(a, b, c, d) a,
 #define O(name, imm, unusedPop, unusedPush, unusedFlags) imm
     OPCODES
 // re-using definition of O below.
@@ -61,42 +65,61 @@ ArgType immType(const Opcode opcode, int idx) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
   };
   static const int8_t arg1Types[] = {
 #define NA -1,
 #define ONE(a) -1,
 #define TWO(a, b) b,
 #define THREE(a, b, c) b,
+#define FOUR(a, b, c, d) b,
     OPCODES
 // re-using definition of O below.
 #undef NA
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
   };
   static const int8_t arg2Types[] = {
 #define NA -1,
 #define ONE(a) -1,
 #define TWO(a, b) -1,
 #define THREE(a, b, c) c,
+#define FOUR(a, b, c, d) c,
+    OPCODES
+#undef NA
+#undef ONE
+#undef TWO
+#undef THREE
+#undef FOUR
+  };
+  static const int8_t arg3Types[] = {
+#define NA -1,
+#define ONE(a) -1,
+#define TWO(a, b) -1,
+#define THREE(a, b, c) -1,
+#define FOUR(a, b, c, d) d,
     OPCODES
 #undef O
 #undef NA
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
   };
   switch (idx) {
     case 0: return (ArgType)arg0Types[opcode];
     case 1: return (ArgType)arg1Types[opcode];
     case 2: return (ArgType)arg2Types[opcode];
+    case 3: return (ArgType)arg3Types[opcode];
     default: ASSERT(false); return (ArgType)-1;
   }
 }
 
 int immSize(const Opcode* opcode, int idx) {
   ASSERT(idx >= 0 && idx < numImmediates(*opcode));
-  assert(idx < 3); // No opcodes have more than three immediates
+  always_assert(idx < 4); // No opcodes have more than four immediates
   static const int8_t argTypeToSizes[] = {
 #define ARGTYPE(nm, type) sizeof(type),
 #define ARGTYPEVEC(nm, type) 0,
@@ -109,6 +132,7 @@ int immSize(const Opcode* opcode, int idx) {
     intptr_t offset = 1;
     if (idx >= 1) offset += immSize(opcode, 0);
     if (idx >= 2) offset += immSize(opcode, 1);
+    if (idx >= 3) offset += immSize(opcode, 2);
     // variable size
     unsigned char imm = *(unsigned char*)(opcode + offset);
     // Low order bit set => 4-byte.
@@ -117,14 +141,19 @@ int immSize(const Opcode* opcode, int idx) {
     intptr_t offset = 1;
     if (idx >= 1) offset += immSize(opcode, 0);
     if (idx >= 2) offset += immSize(opcode, 1);
+    if (idx >= 3) offset += immSize(opcode, 2);
     int prefixes, vecElemSz;
-    if (immType(*opcode, idx) == MA) {
+    auto itype = immType(*opcode, idx);
+    if (itype == MA) {
       prefixes = 2;
       vecElemSz = sizeof(uint8_t);
-    } else {
-      ASSERT(immType(*opcode, idx) == BLA);
+    } else if (itype == BLA) {
       prefixes = 1;
       vecElemSz = sizeof(Offset);
+    } else {
+      ASSERT(itype == SLA);
+      prefixes = 1;
+      vecElemSz = sizeof(StrVecItem);
     }
     return prefixes * sizeof(int32_t) +
       vecElemSz * *(int32_t*)((int8_t*)opcode + offset);
@@ -136,7 +165,7 @@ int immSize(const Opcode* opcode, int idx) {
 
 bool immIsVector(Opcode opcode, int idx) {
   ArgType type = immType(opcode, idx);
-  return (type == MA || type == BLA);
+  return (type == MA || type == BLA || type == SLA);
 }
 
 bool hasImmVector(Opcode opcode) {
@@ -157,14 +186,14 @@ ArgUnion getImm(const Opcode* opcode, int idx) {
     // Advance over this immediate.
     p += immSize(opcode, cursor);
   }
-  assert(cursor == idx);
+  always_assert(cursor == idx);
   ArgType type = immType(*opcode, idx);
   if (type == IVA || type == HA || type == IA) {
     retval.u_IVA = decodeVariableSizeImm(&p);
   } else if (!immIsVector(*opcode, cursor)) {
     memcpy(&retval.bytes, p, immSize(opcode, idx));
   }
-  assert(numImmediates(*opcode) > idx);
+  always_assert(numImmediates(*opcode) > idx);
   return retval;
 }
 
@@ -255,6 +284,7 @@ Offset* instrJumpOffset(Opcode* instr) {
 #define ONE(a) a
 #define TWO(a, b) (a + 2 * b)
 #define THREE(a, b, c) (a + 2 * b + 4 * c)
+#define FOUR(a, b, c, d) (a + 2 * b + 4 * c + 8 * d)
 #define O(name, imm, pop, push, flags) imm,
     OPCODES
 #undef NA
@@ -271,10 +301,11 @@ Offset* instrJumpOffset(Opcode* instr) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef O
   };
 
-  ASSERT(*instr != OpSwitch);
+  ASSERT(!isSwitch(*instr));
   int mask = jumpMask[*instr];
   if (mask == 0) {
     return NULL;
@@ -285,6 +316,7 @@ Offset* instrJumpOffset(Opcode* instr) {
     case 1: immNum = 0; break;
     case 2: immNum = 1; break;
     case 4: immNum = 2; break;
+    case 8: immNum = 3; break;
     default: ASSERT(false); return NULL;
   }
 
@@ -308,7 +340,9 @@ Offset instrJumpTarget(const Opcode* instrs, Offset pos) {
 int numSuccs(const Opcode* instr) {
   if (!instrIsControlFlow(*instr)) return 1;
   if ((instrFlags(*instr) & TF) != 0) {
-    if (Op(*instr) == OpSwitch) return *(int*)(instr + 1);
+    if (isSwitch(*instr)) {
+      return *(int*)(instr + 1);
+    }
     if (Op(*instr) == OpJmp) return 1;
     return 0;
   }
@@ -327,6 +361,7 @@ int instrNumPops(const Opcode* opcode) {
 #define ONE(...) 1
 #define TWO(...) 2
 #define THREE(...) 3
+#define FOUR(...) 4
 #define LMANY(...) -1
 #define C_LMANY(...) -2
 #define V_LMANY(...) -2
@@ -338,6 +373,7 @@ int instrNumPops(const Opcode* opcode) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef LMANY
 #undef C_LMANY
 #undef V_LMANY
@@ -376,6 +412,7 @@ int instrNumPushes(const Opcode* opcode) {
 #define ONE(...) 1
 #define TWO(...) 2
 #define THREE(...) 3
+#define FOUR(...) 4
 #define INS_1(...) 0
 #define INS_2(...) 0
 #define O(name, imm, pop, push, flags) push,
@@ -384,6 +421,7 @@ int instrNumPushes(const Opcode* opcode) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef INS_1
 #undef INS_2
 #undef O
@@ -397,6 +435,7 @@ StackTransInfo instrStackTransInfo(const Opcode* opcode) {
 #define ONE(...) StackTransInfo::PushPop
 #define TWO(...) StackTransInfo::PushPop
 #define THREE(...) StackTransInfo::PushPop
+#define FOUR(...) StackTransInfo::PushPop
 #define INS_1(...) StackTransInfo::InsertMid
 #define INS_2(...) StackTransInfo::InsertMid
 #define O(name, imm, pop, push, flags) push,
@@ -405,6 +444,7 @@ StackTransInfo instrStackTransInfo(const Opcode* opcode) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef INS_1
 #undef INS_2
 #undef O
@@ -414,6 +454,7 @@ StackTransInfo instrStackTransInfo(const Opcode* opcode) {
 #define ONE(...) -1
 #define TWO(...) -1
 #define THREE(...) -1
+#define FOUR(...) -1
 #define INS_1(...) 0
 #define INS_2(...) 1
 #define O(name, imm, pop, push, flags) push,
@@ -422,6 +463,7 @@ StackTransInfo instrStackTransInfo(const Opcode* opcode) {
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef INS_2
 #undef INS_1
 #undef O
@@ -642,6 +684,17 @@ std::string instrToString(const Opcode* it, const Unit* u /* = NULL */) {
 
 #define READV() out << " " << decodeVariableSizeImm(&it);
 
+#define READIVA() do {                      \
+  out << " ";                               \
+  auto imm = decodeVariableSizeImm(&it);    \
+  if (op == OpIncStat && immIdx == 0) {     \
+    out << Stats::g_counterNames[imm];      \
+  } else {                                  \
+    out << imm;                             \
+  }                                         \
+  immIdx++;                                 \
+} while (false)
+
 #define READOA() do {                                             \
   int immVal = (int)*((uchar*)&*it);                              \
   it += sizeof(uchar);                                            \
@@ -701,15 +754,31 @@ std::string instrToString(const Opcode* it, const Unit* u /* = NULL */) {
   out << ">";                                                           \
 } while (false)
 
-#define READIVEC() do {                     \
-  int sz = *(int*)it;                       \
-  it += sizeof(int);                        \
+#define READLITSTR(sep) do {                                      \
+  Id id = readData<Id>(it);                                       \
+  if (id < 0) {                                                   \
+    ASSERT(op == OpSSwitch);                                      \
+    out << sep << "-";                                            \
+  } else if (u) {                                                 \
+    const StringData* sd = u->lookupLitstrId(id);                 \
+    out << sep << "\"" <<                                         \
+      Util::escapeStringForCPP(sd->data(), sd->size()) << "\"";   \
+  } else {                                                        \
+    out << sep << id;                                             \
+  }                                                               \
+} while (false)
+
+#define READSVEC() do {                     \
+  int sz = readData<int>(it);               \
   out << " <";                              \
-  std::string sep;                          \
+  const char* sep = "";                     \
   for (int i = 0; i < sz; ++i) {            \
-    Offset o = *(Offset*)it;                \
-    it += sizeof(Offset);                   \
     out << sep;                             \
+    if (op == OpSSwitch) {                  \
+      READLITSTR("");                       \
+      out << ":";                           \
+    }                                       \
+    Offset o = readData<Offset>(it);        \
     if (u != NULL) {                        \
       out << u->offsetOf(iStart + o);       \
     } else {                                \
@@ -719,28 +788,23 @@ std::string instrToString(const Opcode* it, const Unit* u /* = NULL */) {
   }                                         \
   out << ">";                               \
 } while (false)
+
 #define ONE(a) H_##a
 #define TWO(a, b) H_##a; H_##b
 #define THREE(a, b, c) H_##a; H_##b; H_##c;
+#define FOUR(a, b, c, d) H_##a; H_##b; H_##c; H_##d;
 #define NA
 #define H_MA READVEC()
-#define H_BLA READIVEC()
-#define H_IVA READV()
+#define H_BLA READSVEC()
+#define H_SLA READSVEC()
+#define H_IVA READIVA()
 #define H_I64A READ(int64)
 #define H_HA READV()
 #define H_IA READV()
 #define H_DA READ(double)
 #define H_BA READOFF()
 #define H_OA READOA()
-#define H_SA                                                      \
-  if (u) {                                                        \
-    const StringData* sd = u->lookupLitstrId(*((Id*)it));         \
-    out << " \"" <<                                               \
-      Util::escapeStringForCPP(sd->data(), sd->size()) << "\"";   \
-  } else {                                                        \
-    out << " " << *((Id*)it);                                     \
-  }                                                               \
-  it += sizeof(Id)
+#define H_SA READLITSTR(" ")
 #define H_AA                                                  \
   if (u) {                                                    \
     out << " ";                                               \
@@ -752,6 +816,7 @@ std::string instrToString(const Opcode* it, const Unit* u /* = NULL */) {
 #define O(name, imm, push, pop, flags)    \
   case Op##name: {                        \
     out << #name;                         \
+    UNUSED unsigned immIdx = 0;           \
     imm;                                  \
     break;                                \
   }
@@ -761,8 +826,11 @@ OPCODES
 #undef ONE
 #undef TWO
 #undef THREE
+#undef FOUR
 #undef NA
 #undef H_MA
+#undef H_BLA
+#undef H_SLA
 #undef H_IVA
 #undef H_I64A
 #undef H_HA
@@ -809,7 +877,7 @@ ImmVector getImmVector(const Opcode* opcode) {
       void* vp = getImmPtr(opcode, k);
       return ImmVector::createFromStream(
         static_cast<const uint8_t*>(vp));
-    } else if (t == BLA) {
+    } else if (t == BLA || t == SLA) {
       void* vp = getImmPtr(opcode, k);
       return ImmVector::createFromStream(
         static_cast<const int32_t*>(vp));

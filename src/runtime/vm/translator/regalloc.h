@@ -19,9 +19,9 @@
 #include <boost/noncopyable.hpp>
 
 #include "util/trace.h"
-#include "util/bitops.h"
-#include "translator.h"
-#include "asm-x64.h"
+#include "util/asm-x64.h"
+#include "runtime/vm/translator/translator.h"
+#include "runtime/vm/translator/physreg.h"
 
 namespace HPHP { namespace VM { namespace Transl {
 
@@ -41,96 +41,6 @@ static const int kMaxRegs = 64;
  * overheads per register, and a guarantee that any runnable code will
  * actually be able to allocate registers.
  */
-typedef register_name_t PhysReg;
-static const PhysReg InvalidReg = reg::noreg;
-
-class RegSet {
-  uint64_t m_bits;
-
- public:
-  RegSet() : m_bits(0) { }
-  explicit RegSet(PhysReg pr) : m_bits(1 << int(pr)) { }
-
-  // union
-  RegSet operator|(const RegSet& rhs) const {
-    RegSet retval;
-    retval.m_bits = m_bits | rhs.m_bits;
-    return retval;
-  }
-
-  RegSet& operator|=(const RegSet& rhs) {
-    m_bits |= rhs.m_bits;
-    return *this;
-  }
-
-  // Equality
-  bool operator==(const RegSet& rhs) const {
-    return m_bits == rhs.m_bits;
-  }
-
-  bool operator!=(const RegSet& rhs) const {
-    return !(*this == rhs);
-  }
-
-  // Difference
-  RegSet operator-(const RegSet& rhs) const {
-    RegSet retval;
-    retval.m_bits = m_bits & ~rhs.m_bits;
-    return retval;
-  }
-
-  RegSet& operator-=(const RegSet& rhs) {
-    *this = *this - rhs;
-    return *this;
-  }
-
-  void clear() {
-    m_bits = 0;
-  }
-
-  int size() const {
-    return __builtin_popcount(m_bits);
-  }
-
-  RegSet& add(PhysReg pr) {
-    *this |= RegSet(pr);
-    return *this;
-  }
-
-  RegSet& remove(PhysReg pr) {
-    m_bits = m_bits & ~(1 << int(pr));
-    return *this;
-  }
-
-  bool contains(PhysReg pr) const {
-    return bool(m_bits & (1 << int(pr)));
-  }
-
-  bool empty() const {
-    return m_bits == 0;
-  }
-
-  // For iterating over present registers, e.g.:
-  //   while (regSet.findFirst(reg)) {
-  //     regSet.remove(reg);
-  //     foo(reg);
-  //   }
-  bool findFirst(PhysReg& reg) {
-    uint64_t out;
-    bool retval = ffs64(m_bits, out);
-    reg = PhysReg(out);
-    ASSERT(!retval || (int(reg) >= 0 && int(reg) < 64));
-    return retval;
-  }
-
-  bool findLast(PhysReg& reg) {
-    uint64_t out;
-    bool retval = fls64(m_bits, out);
-    reg = PhysReg(out);
-    ASSERT(!retval || (int(reg) >= 0 && int(reg) < 64));
-    return retval;
-  }
-};
 
 struct RegContent {
   enum Kind {
@@ -245,7 +155,7 @@ struct RegInfo {
     };
     char buf[1024];
     sprintf(buf, "Reg:%02d:%s:%lld:Type:%d",
-            m_pReg, names[m_state], m_epoch, m_type);
+            int(m_pReg), names[m_state], m_epoch, m_type);
     return Trace::prettyNode(buf, m_cont);
   }
   RegInfo() : m_cont(), m_state(FREE) { }
@@ -353,7 +263,7 @@ class RegAlloc {
   void assertRegIsFree(PhysReg pr) const {
     if (debug && !regIsFree(pr)) {
       std::cerr << getInfo(pr)->pretty() << std::endl;
-      assert(false && "Expected register to be free");
+      always_assert(false && "Expected register to be free");
     }
   }
   DataType regType(PhysReg pr) const {
@@ -526,7 +436,11 @@ class LazyScratchReg : boost::noncopyable {
   void alloc(PhysReg pr = InvalidReg);
   void dealloc();
   void realloc(PhysReg pr = InvalidReg);
-  PhysReg operator*() const;
+
+  friend PhysReg r(const LazyScratchReg& l) { return l.m_reg; }
+  friend Reg8 rbyte(const LazyScratchReg& l) { return rbyte(l.m_reg); }
+  friend Reg32 r32(const LazyScratchReg& l) { return r32(l.m_reg); }
+  friend Reg64 r64(const LazyScratchReg& l) { return r64(l.m_reg); }
 };
 
 class ScratchReg : public LazyScratchReg {
@@ -551,7 +465,9 @@ struct DumbScratchReg : private boost::noncopyable {
   explicit DumbScratchReg(RegSet& allocSet);
   ~DumbScratchReg();
 
-  PhysReg operator*() const;
+  friend PhysReg r(const DumbScratchReg& d) { return d.m_reg; }
+  friend Reg32 r32(const DumbScratchReg& d) { return r32(d.m_reg); }
+  friend Reg64 r64(const DumbScratchReg& d) { return r64(d.m_reg); }
 
 private:
   RegSet& m_regPool;

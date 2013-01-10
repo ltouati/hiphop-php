@@ -25,7 +25,7 @@
 #include <util/atomic.h>
 #include <util/compatibility.h>
 #include <util/util.h>
-#include <util/hardware_counter.h>
+#include <runtime/base/hardware_counter.h>
 
 using std::endl;
 
@@ -152,7 +152,7 @@ int AccessLog::writeLog(Transport *transport, const VirtualHost *vhost,
                         FILE *outFile, const char *format) {
    char c;
    std::ostringstream out;
-   while (c = *format++) {
+   while ((c = *format++)) {
      if (c != '%') {
        out << c;
        continue;
@@ -391,7 +391,7 @@ bool AccessLog::genField(std::ostringstream &out, const char* &format,
     break;
   case 'Y':
     {
-      int64 now = Util::HardwareCounter::GetInstructionCount();
+      int64 now = HardwareCounter::GetInstructionCount();
       out << now - transport->getInstructions();
     }
     break;

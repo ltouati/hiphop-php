@@ -29,7 +29,6 @@
 #include <runtime/vm/repo.h>
 #include <runtime/vm/blob_helper.h>
 #include <runtime/vm/translator/targetcache.h>
-#include <runtime/vm/vm.h>
 #include <runtime/vm/translator/translator-deps.h>
 #include <runtime/vm/translator/translator-inline.h>
 #include <runtime/vm/translator/translator-x64.h>
@@ -110,18 +109,27 @@ Array Unit::getUserFunctions() {
 
 AllClasses::AllClasses()
   : m_next(s_namedDataMap->begin())
-  , m_end(s_namedDataMap->end()) {
-  skip();
+  , m_end(s_namedDataMap->end())
+  , m_current(m_next != m_end ? *m_next->second.clsList() : nullptr) {
+  if (!empty()) skip();
 }
 
 void AllClasses::skip() {
-  Class* cls;
-  while (!empty()) {
-    cls = *m_next->second.clsList();
-    if (cls) break;
+  if (!m_current) {
+    ASSERT(!empty());
     ++m_next;
+    while (!empty()) {
+      m_current = *m_next->second.clsList();
+      if (m_current) break;
+      ++m_next;
+    }
   }
   ASSERT(empty() || front());
+}
+
+void AllClasses::next() {
+  m_current = m_current->m_nextClass;
+  skip();
 }
 
 bool AllClasses::empty() const {
@@ -130,15 +138,13 @@ bool AllClasses::empty() const {
 
 Class* AllClasses::front() const {
   ASSERT(!empty());
-  Class* cls = *m_next->second.clsList();
-  ASSERT(cls);
-  return cls;
+  ASSERT(m_current);
+  return m_current;
 }
 
 Class* AllClasses::popFront() {
   Class* cls = front();
-  ++m_next;
-  skip();
+  next();
   return cls;
 }
 
@@ -239,7 +245,7 @@ bool Unit::MetaHandle::findMeta(const Unit* unit, Offset offset) {
     int hi = *index1 + 2;
     int lo = 1;
     while (hi - lo > 1) {
-      int mid = hi + lo >> 1;
+      int mid = (hi + lo) >> 1;
       if (offset >= index1[mid]) {
         lo = mid;
       } else {
@@ -279,7 +285,7 @@ Unit::Unit()
       m_mergeState(UnitMergeStateUnmerged),
       m_cacheMask(0),
       m_pseudoMainCache(NULL) {
-  TV_WRITE_UNINIT(&m_mainReturn);
+  tvWriteUninit(&m_mainReturn);
   m_mainReturn._count = 0; // flag for whether or not the unit is mergeable
 }
 
@@ -442,7 +448,8 @@ Class* Unit::defClass(const PreClass* preClass,
       tmp.m_savedRbp = (uint64_t)fp;
       tmp.m_savedRip = 0;
       tmp.m_func = preClass->unit()->getMain();
-      tmp.m_soff = preClass->getOffset() - tmp.m_func->base();
+      tmp.m_soff = !fp ? 0
+                       : fp->m_func->unit()->offsetOf(pc) - fp->m_func->base();
       tmp.setThis(NULL);
       tmp.m_varEnv = 0;
       tmp.initNumArgs(0);
@@ -474,8 +481,21 @@ Class* Unit::defClass(const PreClass* preClass,
         Transl::TargetCache::allocKnownClass(newClass.get());
     }
     newClass->m_nextClass = top;
-    Util::compiler_membar();
-    *const_cast<Class**>(clsList) = newClass.get();
+
+    if (atomic_acquire_load(&Class::s_instanceBitsInit)) {
+      // If the instance bitmap has already been set up, we can just initialize
+      // our new class's bits and add ourselves to the class list normally.
+      newClass->setInstanceBits();
+      atomic_release_store(const_cast<Class**>(clsList), newClass.get());
+    } else {
+      // Otherwise, we have to grab the read lock. If the map has been
+      // initialized since we checked, initialize the bits normally. If not, we
+      // must add the new class to the class list before dropping the lock to
+      // ensure its bits are initialized when the time comes.
+      ReadLock l(Class::s_instanceBitsLock);
+      if (Class::s_instanceBitsInit) newClass->setInstanceBits();
+      atomic_release_store(const_cast<Class**>(clsList), newClass.get());
+    }
     newClass.get()->incAtomicCount();
     newClass.get()->setCached();
     DEBUGGER_ATTACHED_ONLY(phpDefClassHook(newClass.get()));
@@ -1003,8 +1023,20 @@ void Unit::mergeImpl(void* tcbase, UnitMergeInfo* mi) {
             if (UNLIKELY(!unit->isMergeOnly())) {
               Stats::inc(Stats::PseudoMain_Reentered);
               TypedValue ret;
+              VarEnv* ve = NULL;
+              if (k == UnitMergeKindReqDoc) {
+                ActRec* fp = g_vmContext->m_fp;
+                if (!fp) {
+                  ve = g_vmContext->m_globalVarEnv;
+                } else {
+                  if (!fp->hasVarEnv()) {
+                    fp->m_varEnv = VarEnv::createLazyAttach(fp);
+                  }
+                  ve = fp->m_varEnv;
+                }
+              }
               g_vmContext->invokeFunc(&ret, unit->getMain(), Array(),
-                                      NULL, NULL, NULL, NULL, NULL);
+                                      NULL, NULL, ve, NULL, NULL);
               tvRefcountedDecRef(&ret);
             } else {
               Stats::inc(Stats::PseudoMain_SkipDeep);
@@ -1188,6 +1220,9 @@ void Unit::prettyPrint(std::ostream &out, size_t startOffset,
         int arg = info.m_arg & ~MetaInfo::VectorArg;
         const char *argKind = info.m_arg & MetaInfo::VectorArg ? "M" : "";
         switch (info.m_kind) {
+          case Unit::MetaInfo::IteratorType:
+            out << " i" << argKind << arg << ":it=" << (int)info.m_data;
+            break;
           case Unit::MetaInfo::DataTypeInferred:
           case Unit::MetaInfo::DataTypePredicted:
             out << " i" << argKind << arg << ":t=" << (int)info.m_data;
@@ -1225,6 +1260,9 @@ void Unit::prettyPrint(std::ostream &out, size_t startOffset,
             break;
           case Unit::MetaInfo::ArrayCapacity:
             out << " capacity=" << info.m_data;
+            break;
+          case Unit::MetaInfo::NonRefCounted:
+            out << " :nrc=" << info.m_data;
             break;
           case Unit::MetaInfo::None:
             ASSERT(false);
@@ -1331,10 +1369,24 @@ Func *Unit::lookupFunc(const NamedEntity *ne, const StringData* name) {
   return func;
 }
 
-Func *Unit::lookupFunc(const StringData *funcName) {
-  const NamedEntity *ne = GetNamedEntity(funcName);
-  Func *func = ne->getCachedFunc();
+Func* Unit::lookupFunc(const StringData* funcName) {
+  const NamedEntity* ne = GetNamedEntity(funcName);
+  Func* func = ne->getCachedFunc();
   return func;
+}
+
+Func* Unit::loadFunc(const NamedEntity* ne, const StringData* funcName) {
+  Func* func = ne->getCachedFunc();
+  if (UNLIKELY(!func)) {
+    if (AutoloadHandler::s_instance->autoloadFunc(StrNR(funcName))) {
+      func = ne->getCachedFunc();
+    }
+  }
+  return func;
+}
+
+Func* Unit::loadFunc(const StringData* funcName) {
+  return loadFunc(GetNamedEntity(funcName), funcName);
 }
 
 //=============================================================================
@@ -1884,7 +1936,7 @@ UnitEmitter::UnitEmitter(const MD5& md5)
     m_bclen(0), m_bc_meta(NULL), m_bc_meta_len(0), m_filepath(NULL),
     m_md5(md5), m_nextFuncSn(0),
     m_allClassesHoistable(true), m_returnSeen(false) {
-  TV_WRITE_UNINIT(&m_mainReturn);
+  tvWriteUninit(&m_mainReturn);
   m_mainReturn._count = 0;
 }
 
@@ -2111,10 +2163,11 @@ void UnitEmitter::recordFunction(FuncEmitter* fe) {
 Func* UnitEmitter::newFunc(const FuncEmitter* fe, Unit& unit, Id id, int line1,
                            int line2, Offset base, Offset past,
                            const StringData* name, Attr attrs, bool top,
-                           const StringData* docComment, int numParams) {
+                           const StringData* docComment, int numParams,
+                           bool isGenerator) {
   Func* f = new (Func::allocFuncMem(name, numParams))
     Func(unit, id, line1, line2, base, past, name, attrs,
-         top, docComment, numParams);
+         top, docComment, numParams, isGenerator);
   m_fMap[fe] = f;
   return f;
 }
@@ -2123,10 +2176,11 @@ Func* UnitEmitter::newFunc(const FuncEmitter* fe, Unit& unit,
                            PreClass* preClass, int line1, int line2,
                            Offset base, Offset past,
                            const StringData* name, Attr attrs, bool top,
-                           const StringData* docComment, int numParams) {
+                           const StringData* docComment, int numParams,
+                           bool isGenerator) {
   Func* f = new (Func::allocFuncMem(name, numParams))
     Func(unit, preClass, line1, line2, base, past, name,
-         attrs, top, docComment, numParams);
+         attrs, top, docComment, numParams, isGenerator);
   m_fMap[fe] = f;
   return f;
 }
@@ -2369,7 +2423,6 @@ Unit* UnitEmitter::create() {
   }
   return u;
 }
-
 
 ///////////////////////////////////////////////////////////////////////////////
 }

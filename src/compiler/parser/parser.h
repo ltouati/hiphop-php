@@ -160,6 +160,8 @@ public:
   void onArray(Token &out, Token &pairs, int op = T_ARRAY);
   void onArrayPair(Token &out, Token *pairs, Token *name, Token &value,
                    bool ref);
+  void onEmptyCollection(Token &out);
+  void onCollectionPair(Token &out, Token *pairs, Token *name, Token &value);
   void onUserAttribute(Token &out, Token *attrList, Token &name, Token &value);
   void onClassConst(Token &out, Token &cls, Token &name, bool text);
   void fixStaticVars();
@@ -207,12 +209,14 @@ public:
   void onContinue(Token &out, Token *expr);
   void onReturn(Token &out, Token *expr, bool checkYield = true);
   void onYield(Token &out, Token *expr, bool assign);
+  void onYieldBreak(Token &out);
   void onGlobal(Token &out, Token &expr);
   void onGlobalVar(Token &out, Token *exprs, Token &expr);
   void onStatic(Token &out, Token &expr);
   void onEcho(Token &out, Token &expr, bool html);
   void onUnset(Token &out, Token &expr);
   void onExpStatement(Token &out, Token &expr);
+  void onForEachStart();
   void onForEach(Token &out, Token &arr, Token &name, Token &value,
                  Token &stmt);
   void onTry(Token &out, Token &tryStmt, Token &className, Token &var,
@@ -235,13 +239,45 @@ public:
   virtual TStatementPtr extractStatement(ScannerToken *stmt);
 
   FileScopePtr getFileScope() { return m_file; }
+
 private:
+  struct FunctionContext {
+    FunctionContext()
+      : isNotGenerator(false)
+      , isGenerator(false)
+      , numYields(0)
+      , numForeaches(0)
+    {}
+
+    // mark this function as generator; returns true on success
+    bool setIsGenerator() {
+      if (!isNotGenerator) isGenerator = true;
+      return !isNotGenerator;
+    }
+
+    // mark this function as non-generator; returns true on success
+    bool setIsNotGenerator() {
+      if (!isGenerator) isNotGenerator = true;
+      return !isGenerator;
+    }
+
+    void checkFinalAssertions() {
+      ASSERT(!isGenerator || !isNotGenerator);
+      ASSERT(foreachHasYield.empty());
+    }
+
+    bool isNotGenerator;  // function determined to not be a generator
+    bool isGenerator;     // function determined to be a generator
+    int numYields;        // number of plain yield statements seen so far
+    int numForeaches;     // number of foreach statements seen so far
+    std::vector<bool> foreachHasYield;  // whether open foreach has yield
+ };
+
   AnalysisResultPtr m_ar;
   FileScopePtr m_file;
   std::vector<std::string> m_comments; // for docComment stack
   std::vector<BlockScopePtrVec> m_scopes;
-  std::vector<int> m_generators;
-  std::vector<int> m_foreaches;
+  std::vector<FunctionContext> m_funcContexts;
   std::vector<std::vector<StatementPtr> > m_prependingStatements;
   std::string m_clsName; // for T_CLASS_C inside a closure
   std::string m_funcName;
@@ -262,6 +298,8 @@ private:
 
   void newScope();
   void completeScope(BlockScopePtr inner);
+
+  bool setIsGenerator();
 
   ExpressionPtr getDynamicVariable(ExpressionPtr exp, bool encap);
   ExpressionPtr createDynamicVariable(ExpressionPtr exp);

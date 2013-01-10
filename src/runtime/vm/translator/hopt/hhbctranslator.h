@@ -81,6 +81,29 @@ private:
   std::stack<SSATmp*> stack;
 };
 
+class TypeGuard {
+ public:
+  enum Kind {
+    Local,
+    Stack
+  };
+
+  TypeGuard(Kind kind, uint32 index, Type::Tag type)
+      : m_kind(kind)
+      , m_index(index)
+      , m_type(type) {
+  }
+
+  Kind      getKind()  const { return m_kind;  }
+  uint32    getIndex() const { return m_index; }
+  Type::Tag getType()  const { return m_type;  }
+
+ private:
+  Kind      m_kind;
+  uint32    m_index;
+  Type::Tag m_type;
+};
+
 class HhbcTranslator {
 public:
   HhbcTranslator(TraceBuilder& builder, const Func* func)
@@ -105,9 +128,10 @@ public:
   void emitPrint();
   void emitThis();
   void emitCheckThis();
+  void emitBareThis(int notice);
   void emitInitThisLoc(int32 id);
   void emitArray(int arrayId);
-  void emitNewArray();
+  void emitNewArray(int capacity);
   void emitNewTuple(int n);
 
   void emitArrayAdd();
@@ -180,7 +204,7 @@ public:
   void emitUnboxR();
   Trace* emitJmpZ(int32 offset);
   Trace* emitJmpNZ(int32 offset);
-  Trace* emitJmp(int32 offset);
+  Trace* emitJmp(int32 offset, bool breakTracelet);
   void emitGt()    { emitCmp(OpGt);    }
   void emitGte()   { emitCmp(OpGte);   }
   void emitLt()    { emitCmp(OpLt);    }
@@ -234,8 +258,8 @@ public:
   void emitCastArray();
   void emitCastObject();
 
-  void emitRetC();
-  void emitRetV();
+  void emitRetC(bool freeInline);
+  void emitRetV(bool freeInline);
 
   void emitLateBoundCls(); // TODO: if this, then LdObjCls
 
@@ -264,17 +288,18 @@ public:
 
   // iterators
   void emitIterInit(uint32 iterVarId, int targetOffset);
-  void emitIterKey(uint32 iterVarId);
+  void emitIterInitK(uint32 iterVarId, int targetOffset);
   void emitIterNext(uint32 iterVarId, int targetOffset);
-  void emitIterValueC(uint32 iterVarId);
+  void emitIterNextK(uint32 iterVarId, int targetOffset);
 
   void emitVerifyParamType(uint32 paramId);
 
   // continuations
   SSATmp* getContLocals(SSATmp* cont);
   void emitCreateCont(bool getArgs, Id funNameStrId);
+  void emitContExit();
   void emitUnpackCont();
-  void emitPackCont(int32 labelId);
+  void emitPackCont(int64 labelId);
   void emitContReceive();
   void emitContRaised();
   void emitContDone();
@@ -288,6 +313,7 @@ public:
   void emitContHandle();
 
   void emitStrlen();
+  void emitIncStat(int32 counter, int32 value);
 
   // tracelet guards
   Trace* guardTypeStack(uint32 stackIndex,
@@ -313,6 +339,8 @@ public:
 
   void setThisAvailable();
 
+  void emitLoadDeps();
+
 private:
 
   /*
@@ -323,7 +351,7 @@ private:
   void emitFCallAux(uint32 numParams,
                     uint32 returnBcOffset,
                     const Func* callee);
-  void emitRet(SSATmp* retVal, Trace* exitTrace);
+  void emitRet(SSATmp* retVal, Trace* exitTrace, bool freeInline);
   template<Type::Tag T> void emitIsTypeC();
   template<Type::Tag T> void emitIsTypeL(int id);
   void emitCmp(Opcode opc);
@@ -340,8 +368,10 @@ private:
   SSATmp* emitLdLocWarn(uint32 id, Type::Tag type, Trace* target);
   void emitInterpOne(Type::Tag type, Trace* target = NULL);
   void emitInterpOneOrPunt(Type::Tag type, Trace* target = NULL);
-  void emitBinaryArith(Opcode, bool isBitOp = false);
+  void emitBinaryArith(Opcode);
   void checkTypeStackAux(uint32 stackIndex, Type::Tag type, Trace* nextTrace);
+  void loadStack(uint32 stackIndex, Type::Tag type);
+
 
   /*
    * Accessors for the current function being compiled and its
@@ -384,20 +414,21 @@ private:
   /*
    * Fields
    */
-  TraceBuilder& m_tb;
-  const Func*   m_curFunc;
-  uint32        m_bcOff;
-  uint32        m_bcOffNextTrace;
-  bool          m_firstBcOff;
-  bool          m_lastBcOff;
-  bool          m_hasRet;
+  TraceBuilder&     m_tb;
+  const Func*       m_curFunc;
+  uint32            m_bcOff;
+  uint32            m_bcOffNextTrace;
+  bool              m_firstBcOff;
+  bool              m_lastBcOff;
+  bool              m_hasRet;
   // if set, then generate unbox instructions for memory accesses (Get
   // and Set bytecodes). Otherwise, memory accesses will bail the trace
   // on an access to a boxed value.
-  bool          m_unboxPtrs;
-  uint32        m_stackDeficit; // offset of virtual sp from physical sp
-  EvalStack     m_evalStack;
-  FpiStack      m_fpiStack;
+  bool              m_unboxPtrs;
+  uint32            m_stackDeficit; // offset of virtual sp from physical sp
+  EvalStack         m_evalStack;
+  FpiStack          m_fpiStack;
+  vector<TypeGuard> m_typeGuards;
 };
 
 }}} // namespace HPHP::VM::JIT

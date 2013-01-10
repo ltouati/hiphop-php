@@ -31,19 +31,13 @@ using namespace HPHP;
 ///////////////////////////////////////////////////////////////////////////////
 
 void hphp_ffi_ArrayData_decRef(ArrayData *p) {
-  if (!p->decRefCount()) {
-    p->release();
-  }
+  decRefArr(p);
 }
 void hphp_ffi_StringData_decRef(StringData *p) {
-  if (!p->decRefCount()) {
-    p->release();
-  }
+  decRefStr(p);
 }
 void hphp_ffi_ObjectData_decRef(ObjectData *p) {
-  if (!p->decRefCount()) {
-    p->release();
-  }
+  decRefObj(p);
 }
 int hphp_ffi_exportVariant(CVarRef v, void** result) {
   switch (v.getType()) {

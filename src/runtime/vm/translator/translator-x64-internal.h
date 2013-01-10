@@ -45,42 +45,6 @@ static const DataType BitwiseKindOfString = KindOfString;
 
 // RAII aids to machine code.
 
-template<int StackParity>
-class PhysRegSaverParity {
-protected:
-  X64Assembler& a;
-  RegSet s;
-  int numElts;
-public:
-  PhysRegSaverParity(X64Assembler& a_, RegSet s_) : a(a_), s(s_) {
-    RegSet sCopy = s;
-    numElts = 0;
-    PhysReg reg;
-    while (sCopy.findFirst(reg)) {
-      a.   pushr(reg);
-      sCopy.remove(reg);
-      numElts++;
-    }
-    if ((numElts & 1) == StackParity) {
-      // Maintain stack evenness for SIMD compatibility.
-      a.   sub_imm32_reg64(8, rsp);
-    }
-  }
-
-  ~PhysRegSaverParity() {
-    if ((numElts & 1) == StackParity) {
-      // See above; stack parity.
-      a.   add_imm32_reg64(8, rsp);
-    }
-    RegSet sCopy = s;
-    PhysReg reg;
-    while (sCopy.findLast(reg)) {
-      a.   popr(reg);
-      sCopy.remove(reg);
-    }
-  }
-};
-
 // In shared stubs, we've already made the stack odd by calling
 // from a to astubs. Calls from a are on an even rsp.
 typedef PhysRegSaverParity<0> PhysRegSaverStub;
@@ -107,6 +71,27 @@ public:
   }
   ~RedirectSpillFill() {
     tx64->m_spillFillCode = m_oldSpf;
+  }
+};
+
+struct Call {
+  enum { Direct, Virtual } m_kind;
+  union {
+    void* m_fptr;
+    int   m_offset;
+  };
+
+  explicit Call(void *p) : m_kind(Direct), m_fptr(p) {}
+  explicit Call(int off) : m_kind(Virtual), m_offset(off) {}
+  Call(Call const&) = default;
+
+  void emit(X64Assembler& a, PhysReg scratch) const {
+    if (m_kind == Direct) {
+      a.    call (TCA(m_fptr));
+    } else {
+      a.    loadq  (*rdi, scratch);
+      a.    call   (scratch[m_offset]);
+    }
   }
 };
 
@@ -150,7 +135,7 @@ class DiamondReturn : boost::noncopyable {
   TCA m_finishBranchFrontier;
 
 private:
-  template<int> friend class UnlikelyIfBlock;
+  friend class UnlikelyIfBlock;
 
   void initBranch(X64Assembler* branchA, X64Assembler* mainA) {
     /*
@@ -284,36 +269,35 @@ public:
 
 // Code to profile how often our UnlikelyIfBlock branches are taken in
 // practice. Enable with TRACE=unlikely:1
-struct UnlikelyHitRate {
+struct JmpHitRate {
   litstr key;
   uint64_t check;
-  uint64_t hit;
-  UnlikelyHitRate() : key(nullptr), check(0), hit(0) {}
+  uint64_t take;
+  JmpHitRate() : key(nullptr), check(0), take(0) {}
 
   float rate() const {
-    return 100.0 * hit / check;
+    return 100.0 * take / check;
   }
-  bool operator<(const UnlikelyHitRate& b) const {
+  bool operator<(const JmpHitRate& b) const {
     return rate() > b.rate();
   }
 };
-typedef hphp_hash_map<litstr, UnlikelyHitRate, pointer_hash<const char>>
-  UnlikelyHitMap;
-extern __thread UnlikelyHitMap* tl_unlikelyHits;
+typedef hphp_hash_map<litstr, JmpHitRate, pointer_hash<const char>> JmpHitMap;
+extern __thread JmpHitMap* tl_unlikelyHits;
+extern __thread JmpHitMap* tl_jccHits;
 
-static void recordUnlikelyProfile(litstr key, int64 hit) {
-  UnlikelyHitRate& r = (*tl_unlikelyHits)[key];
+template<Trace::Module mod>
+static void recordJmpProfile(litstr key, int64 take) {
+  JmpHitMap& map = mod == Trace::unlikely ? *tl_unlikelyHits : *tl_jccHits;
+  JmpHitRate& r = map[key];
   r.key = key;
-  if (hit) {
-    r.hit++;
-  } else {
-    r.check++;
-  }
+  r.check++;
+  if (take) r.take++;
 }
 
-inline void emitUnlikelyProfile(bool hit, bool saveFlags,
-                                X64Assembler& a) {
-  if (!Trace::moduleEnabledRelease(Trace::unlikely)) return;
+template<Trace::Module mod>
+void emitJmpProfile(X64Assembler& a, ConditionCode cc) {
+  if (!Trace::moduleEnabledRelease(mod)) return;
   const ssize_t sz = 1024;
   char key[sz];
 
@@ -324,10 +308,10 @@ inline void emitUnlikelyProfile(bool hit, bool saveFlags,
   // Get instruction if wanted
   const NormalizedInstruction* ni = tx64->m_curNI;
   std::string inst;
-  if (Trace::moduleEnabledRelease(Trace::unlikely, 2)) {
+  if (Trace::moduleEnabledRelease(mod, 2)) {
     inst = std::string(", ") + (ni ? opcodeToName(ni->op()) : "<none>");
   }
-  const char* fmt = Trace::moduleEnabledRelease(Trace::unlikely, 3) ?
+  const char* fmt = Trace::moduleEnabledRelease(mod, 3) ?
     "%-25s:%-5d, %-28s%s" :
     "%-25s:%-5d (%-28s%s)";
   if (snprintf(key, sz, fmt,
@@ -337,54 +321,183 @@ inline void emitUnlikelyProfile(bool hit, bool saveFlags,
   }
   litstr data = StringData::GetStaticString(key)->data();
 
-  if (saveFlags) a.pushf();
+  RegSet allRegs = kAllX64Regs;
+  allRegs.remove(rsi);
+
+  a.  pushf  ();
+  a.  push   (rsi);
+  a.  setcc  (cc, sil);
+  a.  movzbl (sil, esi);
   {
-    PhysRegSaver regs(a, kAllX64Regs);
-    int i = 0;
-    a.emitImmReg((intptr_t)data, argNumToRegName[i++]);
-    a.emitImmReg((intptr_t)hit, argNumToRegName[i++]);
-    a.call((TCA)recordUnlikelyProfile);
+    PhysRegSaver regs(a, allRegs);
+    a.emitImmReg((intptr_t)data, rdi);
+    if (false) {
+      recordJmpProfile<mod>("", 0);
+    }
+    a.call   ((TCA)recordJmpProfile<mod>);
   }
-  if (saveFlags) a.popf();
+  a.  pop    (rsi);
+  a.  popf   ();
 }
 
-inline void initUnlikelyProfile() {
-  if (!Trace::moduleEnabledRelease(Trace::unlikely)) return;
-  tl_unlikelyHits = new UnlikelyHitMap();
+inline void initJmpProfile() {
+  if (Trace::moduleEnabledRelease(Trace::unlikely)) {
+    tl_unlikelyHits = new JmpHitMap();
+  }
+  if (Trace::moduleEnabledRelease(Trace::jcc)) {
+    tl_jccHits = new JmpHitMap();
+  }
 }
 
-inline void dumpUnlikelyProfile() {
-  if (!Trace::moduleEnabledRelease(Trace::unlikely)) return;
-  std::vector<UnlikelyHitRate> hits;
-  UnlikelyHitRate overall;
+inline void dumpProfileImpl(Trace::Module mod) {
+  JmpHitMap*& table = mod == Trace::jcc ? tl_jccHits : tl_unlikelyHits;
+  if (!table) return;
+
+  std::vector<JmpHitRate> hits;
+  JmpHitRate overall;
   overall.key = "total";
-  for (auto item : *tl_unlikelyHits) {
+  for (auto& item : *table) {
     overall.check += item.second.check;
-    overall.hit += item.second.hit;
+    overall.take += item.second.take;
     hits.push_back(item.second);
   }
   if (hits.empty()) return;
-  auto cmp = [&](const UnlikelyHitRate& a, const UnlikelyHitRate& b) {
-    return a.hit > b.hit ? true : a.hit == b.hit ? a.check > b.check : false;
+  auto cmp = [&](const JmpHitRate& a, const JmpHitRate& b) {
+    return a.take > b.take ? true
+    : a.take == b.take ? a.check > b.check
+    : false;
   };
   std::sort(hits.begin(), hits.end(), cmp);
-  Trace::traceRelease("UnlikelyIfBlock hit rates for %s:\n",
+  Trace::traceRelease("%s hit rates for %s:\n",
+                      mod == Trace::jcc ? "JccBlock" : "UnlikelyIfBlock",
                       g_context->getRequestUrl(50).c_str());
-  const char* fmt = Trace::moduleEnabledRelease(Trace::unlikely, 3) ?
+  const char* fmt = Trace::moduleEnabledRelease(mod, 3) ?
     "%6.2f, %8llu, %8llu, %5.1f, %s\n" :
     "%6.2f%% (%8llu / %8llu, %5.1f%% of total): %s\n";
-  auto printRate = [&](const UnlikelyHitRate& hr) {
+  auto printRate = [&](const JmpHitRate& hr) {
     Trace::traceRelease(fmt,
-                        hr.rate(), hr.hit, hr.check, hr.key,
-                        100.0 * hr.hit / overall.hit);
+                        hr.rate(), hr.take, hr.check, hr.key,
+                        100.0 * hr.take / overall.take);
   };
   printRate(overall);
   std::for_each(hits.begin(), hits.end(), printRate);
   Trace::traceRelease("\n");
 
-  delete tl_unlikelyHits;
-  tl_unlikelyHits = nullptr;
+  delete table;
+  table = nullptr;
 }
+
+inline void dumpJmpProfile() {
+  if (!Trace::moduleEnabledRelease(Trace::unlikely) &&
+      !Trace::moduleEnabledRelease(Trace::jcc)) {
+    return;
+  }
+  dumpProfileImpl(Trace::unlikely);
+  dumpProfileImpl(Trace::jcc);
+}
+
+struct Label : private boost::noncopyable {
+  explicit Label()
+    : m_a(nullptr)
+    , m_address(nullptr)
+  {}
+
+  ~Label() {
+    if (!m_toPatch.empty()) {
+      ASSERT(m_a && m_address && "Label had jumps but was never set");
+    }
+    for (auto& ji : m_toPatch) {
+      switch (ji.type) {
+      case Branch::Jmp:   ji.a->patchJmp(ji.addr, m_address);  break;
+      case Branch::Jmp8:  ji.a->patchJmp8(ji.addr, m_address); break;
+      case Branch::Jcc:   ji.a->patchJcc(ji.addr, m_address);  break;
+      case Branch::Jcc8:  ji.a->patchJcc8(ji.addr, m_address); break;
+      case Branch::Call:  ji.a->patchCall(ji.addr, m_address); break;
+      }
+    }
+  }
+
+  void jmp(X64Assembler& a) {
+    addJump(&a, Branch::Jmp);
+    a.jmp(m_address ? m_address : a.code.frontier);
+  }
+
+  void jmp8(X64Assembler& a) {
+    addJump(&a, Branch::Jmp8);
+    a.jmp8(m_address ? m_address : a.code.frontier);
+  }
+
+  void jcc(X64Assembler& a, ConditionCode cc) {
+    addJump(&a, Branch::Jcc);
+    a.jcc(cc, m_address ? m_address : a.code.frontier);
+  }
+
+  void jcc8(X64Assembler& a, ConditionCode cc) {
+    addJump(&a, Branch::Jcc8);
+    a.jcc8(cc, m_address ? m_address : a.code.frontier);
+  }
+
+  void call(X64Assembler& a) {
+    addJump(&a, Branch::Call);
+    a.call(m_address ? m_address : a.code.frontier);
+  }
+
+  void jmpAuto(X64Assembler& a) {
+    ASSERT(m_address);
+    auto delta = m_address - (a.code.frontier + 2);
+    if (deltaFits(delta, sz::byte)) {
+      jmp8(a);
+    } else {
+      jmp(a);
+    }
+  }
+
+  void jccAuto(X64Assembler& a, ConditionCode cc) {
+    ASSERT(m_address);
+    auto delta = m_address - (a.code.frontier + 2);
+    if (deltaFits(delta, sz::byte)) {
+      jcc8(a, cc);
+    } else {
+      jcc(a, cc);
+    }
+  }
+
+  friend void asm_label(X64Assembler& a, Label& l) {
+    ASSERT(!l.m_address && !l.m_a && "Label was already set");
+    l.m_a = &a;
+    l.m_address = a.code.frontier;
+  }
+
+private:
+  enum class Branch {
+    Jcc,
+    Jcc8,
+    Jmp,
+    Jmp8,
+    Call
+  };
+
+  struct JumpInfo {
+    Branch type;
+    X64Assembler* a;
+    TCA addr;
+  };
+
+private:
+  void addJump(X64Assembler* a, Branch type) {
+    if (m_address) return;
+    JumpInfo info;
+    info.type = type;
+    info.a = a;
+    info.addr = a->code.frontier;
+    m_toPatch.push_back(info);
+  }
+
+private:
+  X64Assembler* m_a;
+  TCA m_address;
+  std::vector<JumpInfo> m_toPatch;
+};
 
 // UnlikelyIfBlock:
 //
@@ -404,7 +517,7 @@ inline void dumpUnlikelyProfile() {
 //    a.   test_reg_reg(inputParam, inputParam);
 //    DiamondReturn retFromStubs;
 //    {
-//      UnlikelyIfBlock<CC_Z> ifNotRax(a, astubs, &retFromStubs);
+//      UnlikelyIfBlock ifNotRax(CC_Z, a, astubs, &retFromStubs);
 //      EMIT_CALL(a, TCA(launch_nuclear_missiles));
 //    }
 //    // The inputParam was non-zero, here is the likely branch:
@@ -422,7 +535,6 @@ inline void dumpUnlikelyProfile() {
 // corresponding DiamondReturns are correctly destroyed in reverse
 // order.  But also note that this can lead to more jumps on the
 // unlikely branch (see ~DiamondReturn).
-template <int Jcc>
 struct UnlikelyIfBlock {
   X64Assembler& m_likely;
   X64Assembler& m_unlikely;
@@ -432,7 +544,8 @@ struct UnlikelyIfBlock {
   bool m_externalDiamond;
   boost::optional<FreezeRegs> m_ice;
 
-  explicit UnlikelyIfBlock(X64Assembler& likely,
+  explicit UnlikelyIfBlock(ConditionCode cc,
+                           X64Assembler& likely,
                            X64Assembler& unlikely,
                            DiamondReturn* returnDiamond = 0)
     : m_likely(likely)
@@ -440,9 +553,8 @@ struct UnlikelyIfBlock {
     , m_returnDiamond(returnDiamond ? returnDiamond : new DiamondReturn())
     , m_externalDiamond(!!returnDiamond)
   {
-    emitUnlikelyProfile(false, true, m_likely);
-    m_likely.jcc(Jcc, m_unlikely.code.frontier);
-    emitUnlikelyProfile(true, false, m_unlikely);
+    emitJmpProfile<Trace::unlikely>(m_likely, cc);
+    m_likely.jcc(cc, m_unlikely.code.frontier);
     m_likelyPostBranch = m_likely.code.frontier;
     m_returnDiamond->initBranch(&unlikely, &likely);
     tx64->m_spillFillCode = &unlikely;
@@ -481,6 +593,75 @@ struct UnlikelyIfBlock {
   m_curFile = __FILE__; m_curFunc = __FUNCTION__; m_curLine = __LINE__; \
   UnlikelyIfBlock
 
+// Helper structs for jcc vs. jcc8.
+struct Jcc8 {
+  static void branch(X64Assembler& a, ConditionCode cc, TCA dest) {
+    a.   jcc8(cc, dest);
+  }
+  static void patch(X64Assembler& a, TCA site, TCA newDest) {
+    a.patchJcc8(site, newDest);
+  }
+};
+
+struct Jcc32 {
+  static void branch(X64Assembler& a, ConditionCode cc, TCA dest) {
+    a.   jcc(cc, dest);
+  }
+  static void patch(X64Assembler& a, TCA site, TCA newDest) {
+    a.patchJcc(site, newDest);
+  }
+};
+
+// JccBlock --
+//   A raw condition-code block; assumes whatever comparison or ALU op
+//   that sets the Jcc has already executed.
+template <ConditionCode Jcc, typename J=Jcc8>
+struct JccBlock {
+  mutable X64Assembler* m_a;
+  TCA m_jcc;
+  mutable DiamondGuard* m_dg;
+
+  explicit JccBlock(X64Assembler& a)
+    : m_a(&a),
+      m_dg(new DiamondGuard(a)) {
+    emitJmpProfile<Trace::jcc>(a, Jcc);
+    m_jcc = a.code.frontier;
+    J::branch(a, Jcc, m_a->code.frontier);
+  }
+
+  ~JccBlock() {
+    if (m_a) {
+      delete m_dg;
+      J::patch(*m_a, m_jcc, m_a->code.frontier);
+    }
+  }
+
+private:
+  JccBlock(const JccBlock&);
+  JccBlock& operator=(const JccBlock&);
+};
+
+#define JccBlock                                                        \
+  m_curFile = __FILE__; m_curFunc = __FUNCTION__; m_curLine = __LINE__; \
+  JccBlock
+
+template<class Lambda>
+void guardDiamond(X64Assembler& a, Lambda body) {
+  DiamondGuard dg(a);
+  body();
+}
+
+template<ConditionCode Jcc, class Lambda>
+void jccBlock(X64Assembler& a, Lambda body) {
+  Label exit;
+
+  guardDiamond(a, [&] {
+    exit.jcc8(a, Jcc);
+    body();
+  });
+asm_label(a, exit);
+}
+
 /*
  * semiLikelyIfBlock is a conditional block of code that is expected
  * to be unlikely, but not so unlikely that we should shove it into
@@ -489,22 +670,23 @@ struct UnlikelyIfBlock {
  * Usage example:
  *
  * a. test_reg64_reg64(*rFoo, *rFoo);
- * semiLikelyIfBlock<CC_Z>(a, [&]{
+ * semiLikelyIfBlock(CC_Z, a, [&]{
  *   EMIT_CALL(a, some_helper);
  *   emitMovRegReg(a, rax, *rFoo);
  * });
  */
-template<int Jcc, class Lambda>
-void semiLikelyIfBlock(X64Assembler& a, Lambda body) {
-  std::unique_ptr<DiamondGuard> dg(new DiamondGuard(a));
-  const TCA toPatch = a.code.frontier;
-  a.jcc8(Jcc, toPatch);
-  const TCA patchLikely = a.code.frontier;
-  a.jmp8(patchLikely);
-  a.patchJcc8(toPatch, a.code.frontier);
-  body();
-  dg.reset();
-  a.patchJmp8(patchLikely, a.code.frontier);
+template<class Lambda>
+void semiLikelyIfBlock(ConditionCode Jcc, X64Assembler& a, Lambda body) {
+  Label likely;
+  Label unlikely;
+
+  guardDiamond(a, [&] {
+    unlikely.jcc8(a, Jcc);
+    likely.jmp8(a);
+  asm_label(a, unlikely);
+    body();
+  });
+asm_label(a, likely);
 }
 
 // A CondBlock is an RAII structure for emitting conditional code. It
@@ -522,7 +704,7 @@ void semiLikelyIfBlock(X64Assembler& a, Lambda body) {
 // a ref-counted cell.
 //
 // It's ok to do reconcilable register operations in the body.
-template<int FieldOffset, int FieldValue, int Jcc>
+template<int FieldOffset, int FieldValue, ConditionCode Jcc>
 struct CondBlock {
   X64Assembler& m_a;
   int m_off;
@@ -658,9 +840,8 @@ local_name(const Location& l) {
 //   Dereference the var in the cell whose address lives in src into
 //   dest.
 static void
-emitDispDeref(X64Assembler &a, PhysReg src, int disp,
-              PhysReg dest) {
-  a.    load_reg64_disp_reg64(src, disp + TVOFF(m_data), dest);
+emitDispDeref(X64Assembler &a, Reg64 src, int disp, Reg64 dest) {
+  a.    loadq (src[disp + TVOFF(m_data)], dest);
 }
 
 static void
@@ -695,10 +876,9 @@ emitStoreTypedValue(X64Assembler& a, DataType type, PhysReg val,
 
 static inline void
 emitStoreInvalid(X64Assembler& a, int disp, PhysReg dest) {
-  a.    store_imm64_disp_reg64(0xfacefacefacefaceULL, disp + TVOFF(m_data),
-                               dest);
-  a.    store_imm32_disp_reg(0xfacefaceU, disp + TVOFF(_count), dest);
-  a.    store_imm32_disp_reg(KindOfInvalid, disp + TVOFF(m_type), dest);
+  a.    storeq (0xfacefacefaceface,     dest[disp + TVOFF(m_data)]);
+  a.    storel ((signed int)0xfaceface, dest[disp + TVOFF(_count)]);
+  a.    storel (KindOfInvalid,          dest[disp + TVOFF(m_type)]);
 }
 
 static inline void
@@ -725,27 +905,37 @@ emitStoreNull(X64Assembler& a, const Location& where) {
   emitStoreNull(a, disp, base);
 }
 
-/*
- * The 'zero' argument can be noreg, rFlag, or a normal register
- * name. If it's noreg, a 0 immediate will be stored to _count. If
- * it's rFlag, nothing will be stored to _count. If it's a normal
- * register name, the contents of that register (hopefully set to zero
- * by the caller) are stored to _count.
- */
 static inline void
 emitCopyTo(X64Assembler& a,
-           PhysReg src,
+           Reg64 src,
            int srcOff,
-           PhysReg dest,
+           Reg64 dest,
            int destOff,
            PhysReg scratch) {
   ASSERT(src != scratch);
   // This is roughly how gcc compiles this.
-  a.    load_reg64_disp_reg64(src, srcOff + TVOFF(m_data), scratch);
   // Blow off _count.
-  a.    store_reg64_disp_reg64(scratch, destOff + TVOFF(m_data), dest);
-  a.    load_reg64_disp_reg32(src, srcOff + TVOFF(m_type), scratch);
-  a.    store_reg32_disp_reg64(scratch, destOff + TVOFF(m_type), dest);
+  auto s64 = r64(scratch);
+  auto s32 = r32(scratch);
+  a.    loadq  (src[srcOff + TVOFF(m_data)], s64);
+  a.    storeq (s64, dest[destOff + TVOFF(m_data)]);
+  a.    loadl  (src[srcOff + TVOFF(m_type)], s32);
+  a.    storel (s32, dest[destOff + TVOFF(m_type)]);
+}
+
+/*
+ * Version of emitCopyTo where both the source and dest are known to
+ * be 16-byte aligned.  In this case we can use xmm.
+ */
+inline void emitCopyToAligned(X64Assembler& a,
+                              Reg64 src,
+                              int srcOff,
+                              Reg64 dest,
+                              int destOff) {
+  static_assert(sizeof(TypedValue) == 16,
+                "emitCopyToAligned assumes sizeof(TypedValue) is 128 bits");
+  a.    movdqa  (src[srcOff], xmm0);
+  a.    movdqa  (xmm0, dest[destOff]);
 }
 
 // ArgManager -- support for passing VM-level data to helper functions.
@@ -774,14 +964,19 @@ public:
 
   void addReg(PhysReg reg) {
     TRACE(6, "ArgManager: push arg %zd reg:r%d\n",
-          m_args.size(), reg);
+          m_args.size(), int(reg));
     m_args.push_back(ArgContent(ArgContent::ArgReg, reg, 0));
   }
 
   void addRegPlus(PhysReg reg, int32_t off) {
     TRACE(6, "ArgManager: push arg %zd regplus:r%d+%d\n",
-          m_args.size(), reg, off);
+          m_args.size(), int(reg), off);
     m_args.push_back(ArgContent(ArgContent::ArgRegPlus, reg, off));
+  }
+
+  void addReg(const LazyScratchReg& l) { addReg(r(l)); }
+  void addRegPlus(const LazyScratchReg& l, int32_t off) {
+    addRegPlus(r(l), off);
   }
 
   void addLocAddr(const Location &loc) {

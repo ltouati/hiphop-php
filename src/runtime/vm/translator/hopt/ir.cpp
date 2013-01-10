@@ -21,6 +21,7 @@
 #include <string.h>
 #include <runtime/base/string_data.h>
 #include <runtime/vm/runtime.h>
+#include <runtime/vm/stats.h>
 #include "runtime/vm/translator/targetcache.h"
 #include <util/trace.h>
 
@@ -30,92 +31,55 @@ namespace HPHP {
 namespace VM {
 namespace JIT{
 
-const char* OpcodeStrings[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef,  \
-            prodRef, mayModRefs, rematerializable, error)               \
-  #name,
+struct {
+  const char* name;
+  uint64_t flags;
+} OpInfo[] = {
+#define OPC(name, flags) { #name, flags },
   IR_OPCODES
-  #undef OPC
+#undef OPC
+  { 0 }
 };
 
-/*
- * Has Dest indicates the instruction produces an SSATmp
- * which is generally the resulting value, but occassionally
- * a heap reference to help order operations, e.g., AddElem
- */
-const int HasDst[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef,  \
-            prodRef, mayModRefs, rematerializable, error)               \
-  hasDst,
-  IR_OPCODES
-  #undef OPC
-};
-bool IRInstruction::hasDst(Opcode opc) {
-  return HasDst[opc];
+const char* opcodeName(Opcode opcode) { return OpInfo[opcode].name; }
+
+bool opcodeHasFlags(Opcode opcode, uint64_t flags) {
+  return OpInfo[opcode].flags & flags;
 }
 
-/*
- * Can CSE this instruction, often not true for instructions
- * which have side-effects such as modifying heap memory.
- */
-const int CanCSE[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef, \
-            prodRef, mayModRefs, rematerializable, error)              \
-  canCSE,
-  IR_OPCODES
-  #undef OPC
-};
+bool IRInstruction::hasDst() const {
+  return opcodeHasFlags(getOpcode(), HasDest);
+}
 
-bool IRInstruction::canCSE(Opcode opc) {
-  // make sure that instructions that are CSE'able can't produce a
+bool IRInstruction::isNative() const {
+  return opcodeHasFlags(getOpcode(), CallsNative);
+}
+
+bool IRInstruction::producesReference() const {
+  return opcodeHasFlags(getOpcode(), ProducesRC);
+}
+
+bool IRInstruction::isRematerializable() const {
+  return opcodeHasFlags(getOpcode(), Rematerializable);
+}
+
+bool IRInstruction::hasMemEffects() const {
+  return opcodeHasFlags(getOpcode(), MemEffects);
+}
+
+bool IRInstruction::canCSE() const {
+  auto canCSE = opcodeHasFlags(getOpcode(), CanCSE);
+  // Make sure that instructions that are CSE'able can't produce a
   // reference count or consume reference counts.
-  ASSERT(!CanCSE[opc] || !producesReference(opc));
-  ASSERT(!CanCSE[opc] || !consumesReferences(opc));
-  return CanCSE[opc];
+  ASSERT(!canCSE || !producesReference());
+  ASSERT(!canCSE || !consumesReferences());
+  return canCSE;
 }
 
-/*
- * HasMemEffects indicates the instruction has side effects on memory.
- */
-const int HasMemEffects[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef, \
-            prodRef, mayModRefs, rematerializable, error)              \
-  effects,
-  IR_OPCODES
-  #undef OPC
-};
-bool IRInstruction::hasMemEffects(Opcode opc) {
-  return HasMemEffects[opc];
+bool IRInstruction::consumesReferences() const {
+  return opcodeHasFlags(getOpcode(), ConsumesRC);
 }
 
-/*
- * HasMemEffects indicates the instruction has side effects on memory.
- */
-const int IsNative[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef, \
-            prodRef, mayModRefs, rematerializable, error)              \
-  native,
-  IR_OPCODES
-  #undef OPC
-};
-bool IRInstruction::isNative(Opcode opc) {
-  return IsNative[opc];
-}
-
-/*
- * ConsumesReferences indicates the instruction decrefs its source operands.
- */
-const int ConsumesReferences[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef,  \
-            prodRef, mayModRefs, rematerializable, error)               \
-  consRef,
-  IR_OPCODES
-  #undef OPC
-};
-bool IRInstruction::consumesReferences(Opcode opc) {
-  return ConsumesReferences[opc];
-}
-// Returns whether the instruction decrefs Operand <srcNo>.
 bool IRInstruction::consumesReference(int srcNo) const {
   if (!consumesReferences()) {
     return false;
@@ -133,42 +97,23 @@ bool IRInstruction::consumesReference(int srcNo) const {
   return true;
 }
 
-/*
- * ProducesReference indicates the instruction has incref'ed its destination
- */
-const int ProducesReference[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef, \
-            prodRef, mayModRefs, rematerializable, error)              \
-  prodRef,
-  IR_OPCODES
-  #undef OPC
-};
-bool IRInstruction::producesReference(Opcode opc) {
-  return ProducesReference[opc];
-}
-
-const int MayModifyRefs[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef, \
-            prodRef, mayModRefs, rematerializable, error)              \
-  mayModRefs,
-  IR_OPCODES
-  #undef OPC
-};
-
-bool IRInstruction::mayModifyRefs(Opcode opc) {
-  return MayModifyRefs[opc];
-}
-
-const int Rematerializable[] = {
-#define OPC(name, hasDst, canCSE, essential, effects, native, consRef, \
-            prodRef, mayModRefs, rematerializable, error)              \
-  rematerializable,
-  IR_OPCODES
-  #undef OPC
-};
-
-bool IRInstruction::isRematerializable(Opcode opc) {
-  return Rematerializable[opc];
+bool IRInstruction::mayModifyRefs() const {
+  Opcode opc = getOpcode();
+  // DecRefNZ does not have side effects other than decrementing the ref
+  // count. Therefore, its MayModifyRefs should be false.
+  if (opc == DecRef) {
+    if (isControlFlowInstruction() || Type::isString(m_type)) {
+      // If the decref has a target label, then it exits if the destructor
+      // has to be called, so it does not have any side effects on the main
+      // trace.
+      return false;
+    }
+    if (Type::isBoxed(m_type)) {
+      Type::Tag innerType = Type::getInnerType(m_type);
+      return innerType == Type::Obj || innerType == Type::Arr;
+    }
+  }
+  return opcodeHasFlags(opc, MayModifyRefs);
 }
 
 Opcode queryNegateTable[] = {
@@ -288,7 +233,10 @@ void IRInstruction::setExtendedSrc(uint32 i, SSATmp* newSrc) {
 }
 
 void IRInstruction::printOpcode(std::ostream& ostream) {
-  ostream << OpcodeStrings[m_op];
+  ostream << opcodeName(m_op);
+  if (m_op == GuardLoc || m_op == GuardStk) {
+    ostream << "<" << Type::Strings[m_type] << ">";
+  }
 }
 
 void IRInstruction::printDst(std::ostream& ostream) {
@@ -312,6 +260,11 @@ void IRInstruction::printSrc(std::ostream& ostream, uint32 i) {
 
 void IRInstruction::printSrcs(std::ostream& ostream) {
   bool first = true;
+  if (getOpcode() == IncStat) {
+    ostream << " " << Stats::g_counterNames[getSrc(0)->getConstValAsInt()] <<
+               ", " << getSrc(1)->getConstValAsInt();
+    return;
+  }
   for (uint32 i = 0; i < m_numSrcs; i++) {
     if (!first) {
       ostream << ", ";
@@ -332,7 +285,7 @@ void IRInstruction::print(std::ostream& ostream) {
   bool isLdMem = m_op == LdMemNR || m_op == LdRaw;
   if (isStMem || m_op == StLoc || isLdMem) {
     if (isLdMem) {
-      ostream << OpcodeStrings[m_op] << " ";
+      ostream << opcodeName(m_op) << " ";
     }
     ostream << "[";
     printSrc(ostream, 0);
@@ -346,7 +299,7 @@ void IRInstruction::print(std::ostream& ostream) {
     ostream << "]:" << Type::Strings[type];
     if (!isLdMem) {
       ASSERT(getNumSrcs() > 1);
-      ostream << " = " <<  OpcodeStrings[m_op] << " ";
+      ostream << " = " << opcodeName(m_op) << " ";
       printSrc(ostream, isStMem ? 2 : 1);
     }
   } else {
@@ -356,6 +309,23 @@ void IRInstruction::print(std::ostream& ostream) {
   if (m_label) {
     ostream << ", ";
     m_label->print(ostream);
+  }
+  if (m_tca) {
+    ostream << ", ";
+    if (m_tca == kIRDirectJccJmpActive) {
+      ostream << "JccJmp_Exit ";
+    }
+    else
+    if (m_tca == kIRDirectJccActive) {
+      ostream << "Jcc_Exit ";
+    }
+    else
+    if (m_tca == kIRDirectGuardActive) {
+      ostream << "Guard_Exit ";
+    }
+    else {
+      ostream << (void*)m_tca;
+    }
   }
 }
 
@@ -416,7 +386,7 @@ void ExtendedInstruction::appendExtendedSrc(IRFactory& irFactory,
   m_numSrcs++;
 }
 
-void ConstInstruction::printConst(std::ostream& ostream) {
+void ConstInstruction::printConst(std::ostream& ostream) const {
   switch (m_type) {
     case Type::Int:
       ostream << m_intVal;
@@ -441,7 +411,7 @@ void ConstInstruction::printConst(std::ostream& ostream) {
       break;
     }
     case Type::Home:
-      m_local->print(ostream);
+      m_local.print(ostream);
       break;
     case Type::Null:
       ostream << "Null";
@@ -462,7 +432,7 @@ void ConstInstruction::printConst(std::ostream& ostream) {
       ostream << "None:" << m_intVal;
       break;
     default:
-      ASSERT(0);
+      not_reached();
   }
 }
 
@@ -490,7 +460,7 @@ uint32 ConstInstruction::hash() {
                              (void*)m_strVal);
   } else if (m_type == Type::Home) {
     return CSEHash::instHash(m_op, m_type, m_srcs[0], m_srcs[1],
-                             (void*)m_local);
+                             m_local.getId());
   } else if (m_type == Type::FuncRef) {
     return CSEHash::instHash(m_op, m_type, m_srcs[0], m_srcs[1],
                              (void*)m_func);
@@ -551,89 +521,74 @@ void TypeInstruction::print(std::ostream& ostream) {
   printSrcs(ostream);
 }
 
-bool SSATmp::isAssignedReg(uint32 index) const {
-  return LinearScan::regNameAsInt(m_assignedLoc[index]) < LinearScan::NumRegs;
+int SSATmp::numNeededRegs() const {
+  Type::Tag type = getType();
+
+  // These types don't get a register because their values are static
+  if (type == Type::Null || type == Type::Uninit || type == Type::None) {
+    return 0;
+  }
+
+  // Need 2 registers for these types, for type and value, or 1 for
+  // Func* and 1 for Class*.
+  if (!Type::isStaticallyKnown(type) || type == Type::FuncClassRef) {
+    return 2;
+  }
+
+  // Everything else just has 1.
+  return 1;
 }
 
-bool SSATmp::isAssignedMmxReg(uint32 index) const {
-  int loc = LinearScan::regNameAsInt(m_assignedLoc[index]);
-  return loc >= LinearScan::FirstMmxReg &&
-         loc < LinearScan::FirstMmxReg + LinearScan::NumMmxRegs;
-}
+int SSATmp::numAllocatedRegs() const {
+  // If an SSATmp is spilled, it must've actually had a full set of
+  // registers allocated to it.
+  if (m_isSpilled) return numNeededRegs();
 
-bool SSATmp::isAssignedSpillLoc(uint32 index) const {
-  return LinearScan::regNameAsInt(m_assignedLoc[index]) >= LinearScan::FirstSpill;
-}
-
-register_name_t SSATmp::getAssignedLoc(uint32 index) {
-  register_name_t reg = m_assignedLoc[index];
-  return reg;
-}
-
-uint32 SSATmp::getNumAssignedLocs() const {
-  uint32 i;
-  for (i = 0; i < MaxNumAssignedLoc && m_assignedLoc[i] != reg::noreg; ++i);
+  // Return the number of register slots that actually have an
+  // allocated register.  We may not have allocated a full
+  // numNeededRegs() worth of registers in some cases (if the value
+  // of this tmp wasn't used, etc).
+  int i = 0;
+  while (i < kMaxNumRegs && m_regs[i] != InvalidReg) {
+    ++i;
+  }
   return i;
 }
 
-uint32 SSATmp::getSpillLoc(uint32 index) const {
-  ASSERT(isAssignedSpillLoc(index));
-  return LinearScan::regNameAsInt(m_assignedLoc[index]) - LinearScan::FirstSpill;
-}
 
-void SSATmp::setSpillLoc(uint32 spillLoc, uint32 index) {
-  m_assignedLoc[index] = (register_name_t)(spillLoc + LinearScan::FirstSpill);
-}
-
-register_name_t SSATmp::getMmxReg(uint32 index) const {
-  ASSERT(isAssignedMmxReg(index));
-  return (register_name_t)(LinearScan::regNameAsInt(m_assignedLoc[index]) -
-                           LinearScan::FirstMmxReg);
-}
-
-void SSATmp::setMmxReg(register_name_t mmxReg, uint32 index) {
-  ASSERT(LinearScan::regNameAsInt(mmxReg) < (int32)LinearScan::NumMmxRegs);
-  m_assignedLoc[index] = (register_name_t)(LinearScan::regNameAsInt(mmxReg) +
-                                           LinearScan::FirstMmxReg);
-}
-
-bool SSATmp::getConstValAsBool()   {
+bool SSATmp::getConstValAsBool() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsBool();
 }
-int64 SSATmp::getConstValAsInt() {
+int64 SSATmp::getConstValAsInt() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsInt();
 }
-int64 SSATmp::getConstValAsRawInt() {
+int64 SSATmp::getConstValAsRawInt() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsRawInt();
 }
-double SSATmp::getConstValAsDbl() {
+double SSATmp::getConstValAsDbl() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsDbl();
 }
-const StringData* SSATmp::getConstValAsStr() {
+const StringData* SSATmp::getConstValAsStr() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsStr();
 }
-const ArrayData* SSATmp::getConstValAsArr() {
+const ArrayData* SSATmp::getConstValAsArr() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsArr();
 }
-const Func* SSATmp::getConstValAsFunc() {
+const Func* SSATmp::getConstValAsFunc() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsFunc();
 }
-const Class* SSATmp::getConstValAsClass() {
+const Class* SSATmp::getConstValAsClass() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsClass();
 }
-const Local* SSATmp::getConstValAsLocal() {
-  ASSERT(isConst());
-  return ((ConstInstruction*)m_inst)->getLocal();
-}
-uintptr_t SSATmp::getConstValAsBits() {
+uintptr_t SSATmp::getConstValAsBits() const {
   ASSERT(isConst());
   return ((ConstInstruction*)m_inst)->getValAsBits();
 }
@@ -641,29 +596,35 @@ uintptr_t SSATmp::getConstValAsBits() {
 void SSATmp::setTCA(TCA tca) {
   getInstruction()->setTCA(tca);
 }
-TCA SSATmp::getTCA() {
+TCA SSATmp::getTCA() const {
   return getInstruction()->getTCA();
 }
 
-void SSATmp::print(std::ostream& ostream, bool printLastUse) {
+void SSATmp::print(std::ostream& os, bool printLastUse) {
   if (m_inst->isDefConst()) {
-    ((ConstInstruction*)m_inst)->printConst(ostream);
+    ((ConstInstruction*)m_inst)->printConst(os);
     return;
   }
-  ostream << "t" << m_id;
+  os << "t" << m_id;
   if (printLastUse && m_lastUseId != 0) {
-    ostream << "@" << m_lastUseId << "#" << m_useCount;
+    os << "@" << m_lastUseId << "#" << m_useCount;
   }
-  if (m_assignedLoc[0] != reg::noreg) {
-    ostream << "(";
-    LinearScan::printLoc(ostream, LinearScan::regNameAsInt(m_assignedLoc[0]));
-    if (m_assignedLoc[1] != reg::noreg) {
-      ostream << ", ";
-      LinearScan::printLoc(ostream, LinearScan::regNameAsInt(m_assignedLoc[1]));
+  if (m_isSpilled || numAllocatedRegs() > 0) {
+    os << '(';
+    if (!m_isSpilled) {
+      for (int i = 0, sz = numAllocatedRegs(); i < sz; ++i) {
+        if (i != 0) os << ", ";
+        os << reg::regname(Reg64(int(m_regs[i])));
+      }
+    } else {
+      for (int i = 0, sz = numNeededRegs(); i < sz; ++i) {
+        if (i != 0) os << ", ";
+        os << m_spillInfo[i];
+      }
     }
-    ostream << ")";
+    os << ')';
   }
-  ostream << ":" << Type::Strings[m_inst->getType()];
+  os << ":" << Type::Strings[m_inst->getType()];
 }
 
 void SSATmp::print() {
@@ -883,6 +844,9 @@ static void error(std::string msg) {
 #define MAX_INSTR_ASM_LEN 128
 xed_state_t xed_state;
 
+static const xed_syntax_enum_t s_xed_syntax =
+  getenv("HHVM_ATT_DISAS") ? XED_SYNTAX_ATT : XED_SYNTAX_INTEL;
+
 void printInstructions(xed_uint8_t* codeStartAddr,
                        xed_uint8_t* codeEndAddr,
                        bool printAddr) {
@@ -901,14 +865,23 @@ void printInstructions(xed_uint8_t* codeStartAddr,
     if (xed_error != XED_ERROR_NONE) error("disasm error: xed_decode failed");
 
     // Get disassembled instruction in codeStr
-    if (!xed_format_context(XED_SYNTAX_INTEL, &xedd, codeStr, MAX_INSTR_ASM_LEN,
-                            ip, NULL)) {
+    if (!xed_format_context(s_xed_syntax, &xedd, codeStr,
+                            MAX_INSTR_ASM_LEN, ip, NULL)) {
       error("disasm error: xed_format_context failed");
     }
 
     if (printAddr) printf("0x%08llx: ", ip);
-    printf("%s\n", codeStr);
     uint32 instrLen = xed_decoded_inst_get_length(&xedd);
+    if (false) { // print encoding, like in objdump
+      unsigned posi = 0;
+      for (; posi < instrLen; ++posi) {
+        printf("%02x ", (uint8_t)frontier[posi]);
+      }
+      for (; posi < 16; ++posi) {
+        printf("   ");
+      }
+    }
+    printf("%s\n", codeStr);
     frontier += instrLen;
     ip       += instrLen;
 
@@ -1015,10 +988,11 @@ void resetIdsAux(Trace* trace) {
     if (dst) {
       dst->setLastUseId(0);
       dst->setUseCount(0);
-      dst->setAnalysisValue(-1);
+      dst->setSpillSlot(-1);
     }
   }
 }
+
 /*
  * Clears the IRInstructions' ids, and the SSATmps' use count and last use id
  * for the given trace and all its exit traces.
@@ -1036,15 +1010,10 @@ void resetIds(Trace* trace) {
 uint32 numberInstructions(Trace* trace,
                           uint32 nextId,
                           bool followControlFlow) {
-  IRInstruction::Iterator it;
-  IRInstruction::List instructionList = trace->getInstructionList();
-  for (it = instructionList.begin();
-       it != instructionList.end();
-       it++) {
-    IRInstruction* inst = *it;
+  for (auto* inst : trace->getInstructionList()) {
     if (SSATmp* dst = inst->getDst()) {
       // Initialize this value for register spilling.
-      dst->setAnalysisValue(-1);
+      dst->setSpillSlot(-1);
     }
     if (inst->getOpcode() == Marker) {
       continue; // don't number markers
@@ -1077,8 +1046,8 @@ uint32 numberInstructions(Trace* trace,
  * Returns true if a label is unreachable -- that is, if a label's id is 0
  * because numbering never visited it.
  */
-bool labelIsUnreachable(const Trace* trace) {
-    return trace->getLabel()->getId() == 0;
+static bool labelIsUnreachable(const Trace* trace) {
+  return trace->getLabel()->getId() == 0;
 }
 
 /*

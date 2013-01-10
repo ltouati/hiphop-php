@@ -351,7 +351,7 @@ Variant invoke_file(CStrRef path, bool once /* = false */,
     echo(g->GV(_SERVER)["HTTP_MYHEADER"]);
     f_header("ResponseHeader: okay");
 
-    sleep(1); // give status check time to happen
+    sleep(1); // give status check and timeout time to happen
     return true;
   }
   return false;
@@ -389,7 +389,7 @@ bool get_call_info_static_method(MethodCallPackage &mcp) {
 }
 
 const ObjectStaticCallbacks * get_object_static_callbacks(CStrRef s) {
-  return get_builtin_object_static_callbacks(s);;
+  return get_builtin_object_static_callbacks(s);
 }
 
 Array get_global_state() { return Array(); }

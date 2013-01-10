@@ -808,6 +808,14 @@ void ClassScope::importUsedTraits(AnalysisResultPtr ar) {
   }
   m_traitStatus = BEING_FLATTENED;
 
+  // First, make sure that parent classes have their traits imported
+  if (!m_parent.empty()) {
+    ClassScopePtr parent = ar->findClass(m_parent);
+    if (parent) {
+      parent->importUsedTraits(ar);
+    }
+  }
+
   // Find trait methods to be imported
   for (unsigned i = 0; i < m_usedTraitNames.size(); i++) {
     ClassScopePtr tCls = ar->findClass(m_usedTraitNames[i]);
@@ -1500,7 +1508,7 @@ void ClassScope::outputCPPHashTableClasses
       "}\n";
 
     JumpTable jt(cg, classes, true, true, true, true);
-    cg_printf(text1);
+    cg_print(text1);
     if (!system) {
       cg_printf(text2, Option::ClassStaticsCallbackPrefix);
     }
@@ -1749,7 +1757,7 @@ static bool buildClassPropTableMap(
         cls->getVariables()->getSymbols();
       for (unsigned j = 0; j < symbolVec.size(); j++) {
         const Symbol *sym = symbolVec[j];
-        assert(!sym->isStatic() || !sym->isOverride());
+        always_assert(!sym->isStatic() || !sym->isOverride());
         entries[sym->isStatic()].push_back(sym);
       }
 
@@ -2269,7 +2277,7 @@ void ClassScope::outputCPPGetClassPropTableImpl(
               string id = findScalar(val, name, cls, &cflags);
               off = siIndex[id] - 1;
             }
-            assert(off >= 0);
+            always_assert(off >= 0);
           }
 
           string prop(sym->getName());
@@ -2401,7 +2409,7 @@ void ClassScope::outputCPPGetClassPropTableImpl(
         m += it->second.size();
       }
       int sz = propTableSize(info.actualIndex[s].size() - 1);
-      assert(n <= sz);
+      always_assert(n <= sz);
       while (n < sz) {
         offsets.push_back(-1);
         n++;
@@ -2590,6 +2598,15 @@ void ClassScope::outputCPPDef(CodeGenerator &cg) {
   if (isVolatile()) {
     string name = CodeGenerator::FormatLabel(m_name);
     if (isRedeclaring()) {
+      cg_indentBegin("if (g->CDEC(%s) && g->%s%s != &%s%s) {\n",
+                     name.c_str(),
+                     Option::ClassStaticsCallbackPrefix,
+                     name.c_str(),
+                     Option::ClassStaticsCallbackPrefix,
+                     getId().c_str());
+      cg_printf("raise_error(\"Class already declared: %s\");\n",
+                CodeGenerator::EscapeLabel(getOriginalName()).c_str());
+      cg_indentEnd("}\n");
       cg_printf("g->%s%s = &%s%s;\n",
                 Option::ClassStaticsCallbackPrefix,
                 name.c_str(),
@@ -2623,6 +2640,11 @@ void ClassScope::outputCPPHeader(AnalysisResultPtr ar,
       cg_printInclude(cls->getHeaderFilename());
     }
   }
+  BOOST_FOREACH(ClassScopeRawPtr cls, m_usedClassesFullHeader) {
+    if (cls && cls->isUserClass()) {
+      cg_printInclude(cls->getHeaderFilename());
+    }
+  }
 
   // 2. Declarations
   cg.namespaceBegin();
@@ -2639,17 +2661,11 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
                                         AnalysisResultPtr ar) {
   cg.setContext(CodeGenerator::CppForwardDeclaration);
 
-  BOOST_FOREACH(ClassScopeRawPtr cls, m_usedClassesFullHeader) {
-    if (cls && cls->isUserClass()) {
-      cg_printInclude(cls->getHeaderFilename());
-    }
-  }
-
   bool done = false;
   BOOST_FOREACH(const string &str, m_usedLiteralStringsHeader) {
     int index = -1;
     int stringId = cg.checkLiteralString(str, index, ar, BlockScopePtr());
-    assert(index != -1);
+    always_assert(index != -1);
     string lisnam = ar->getLiteralStringName(stringId, index);
     done = true;
     if (Option::UseStaticStringProxy) {
@@ -2669,7 +2685,7 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
   BOOST_FOREACH(const int64 &val, m_usedScalarVarIntegersHeader) {
     int index = -1;
     int hash = ar->checkScalarVarInteger(val, index);
-    assert(index != -1);
+    always_assert(index != -1);
     string name = ar->getScalarVarIntegerName(hash, index);
     done = true;
     cg_printf("extern const VarNR &%s;\n", name.c_str());
@@ -2680,7 +2696,7 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
   BOOST_FOREACH(const double &val, m_usedScalarVarDoublesHeader) {
     int index = -1;
     int hash = ar->checkScalarVarDouble(val, index);
-    assert(index != -1);
+    always_assert(index != -1);
     string name = ar->getScalarVarDoubleName(hash, index);
     done = true;
     cg_printf("extern const VarNR &%s;\n", name.c_str());
@@ -2691,7 +2707,7 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
   BOOST_FOREACH(const string &str, m_usedLitVarStringsHeader) {
     int index = -1;
     int stringId = cg.checkLiteralString(str, index, ar, BlockScopePtr());
-    assert(index != -1);
+    always_assert(index != -1);
     string lisnam = ar->getLitVarStringName(stringId, index);
     done = true;
     if (Option::UseStaticStringProxy) {
@@ -2711,7 +2727,7 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
   BOOST_FOREACH(const string &str, m_usedDefaultValueScalarArrays) {
     int index = -1;
     int hash = ar->checkScalarArray(str, index);
-    assert(hash != -1 && index != -1);
+    always_assert(hash != -1 && index != -1);
     string name = ar->getScalarArrayName(hash, index);
     done = true;
     cg_printf("extern StaticArray %s;\n", name.c_str());
@@ -2722,7 +2738,7 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
   BOOST_FOREACH(const string &str, m_usedDefaultValueScalarVarArrays) {
     int index = -1;
     int hash = ar->checkScalarArray(str, index);
-    assert(hash != -1 && index != -1);
+    always_assert(hash != -1 && index != -1);
     string name = ar->getScalarVarArrayName(hash, index);
     done = true;
     cg_printf("extern VarNR %s;\n", name.c_str());
@@ -2732,7 +2748,7 @@ void ClassScope::outputCPPForwardHeader(CodeGenerator &cg,
   done = false;
   BOOST_FOREACH(const string &str, m_usedConstsHeader) {
     BlockScopeConstPtr block = ar->findConstantDeclarer(str);
-    assert(block);
+    always_assert(block);
     ConstantTableConstPtr constants = block->getConstants();
     done = true;
     constants->outputSingleConstant(cg, ar, str);
@@ -3321,7 +3337,7 @@ void ClassScope::outputCPPMethodInvokeTable(
     FunctionScopePtr func;
     string origName;
     if (iterFuncs == funcScopes.end()) {
-      assert(classNameCtor() && !strcmp(name, "__construct"));
+      always_assert(classNameCtor() && !strcmp(name, "__construct"));
       func = findConstructor(ar, false);
       lname = CodeGenerator::FormatLabel(func->getName());
       origName = name;

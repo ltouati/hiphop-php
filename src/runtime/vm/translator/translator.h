@@ -25,9 +25,11 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <boost/dynamic_bitset.hpp>
 
 #include <boost/ptr_container/ptr_vector.hpp>
 #include <util/hash.h>
+#include <util/timer.h>
 #include <runtime/base/execution_context.h>
 #include <runtime/vm/bytecode.h>
 #include <runtime/vm/translator/immstack.h>
@@ -130,6 +132,7 @@ struct SrcKey {
 
   void trace(const char *fmt, ...) const;
   void print(int ninstr) const;
+  std::string pretty() const;
   int offset() const {
     return m_offset;
   }
@@ -254,11 +257,12 @@ class NormalizedInstruction {
   vector<DynLocation*> inputs;
   DynLocation* outStack;
   DynLocation* outLocal;
+  DynLocation* outLocal2; // Used for IterInit* and IterNext*
   DynLocation* outStack2; // Used for CGetL2
   DynLocation* outStack3; // Used for CGetL3
   vector<Location> deadLocs; // locations that die at the end of this
                              // instruction
-  ArgUnion imm[3];
+  ArgUnion imm[4];
   ImmVector immVec; // vector immediate; will have !isValid() if the
                     // instruction has no vector immediate
 
@@ -280,17 +284,18 @@ class NormalizedInstruction {
   // stack at tracelet entry.
   int stackOff;
   int sequenceNum;
-  unsigned hasConstImm:1;
-  unsigned startsBB:1;
-  unsigned breaksTracelet:1;
-  unsigned changesPC:1;
-  unsigned fuseBranch:1;
-  unsigned preppedByRef:1;    // For FPass*; indicates parameter reffiness
-  unsigned manuallyAllocInputs:1;
-  unsigned invertCond:1;
-  unsigned outputPredicted:1;
-  unsigned outputPredictionStatic:1;
-  unsigned ignoreInnerType:1;
+  bool hasConstImm:1;
+  bool startsBB:1;
+  bool breaksTracelet:1;
+  bool changesPC:1;
+  bool fuseBranch:1;
+  bool preppedByRef:1;    // For FPass*; indicates parameter reffiness
+  bool manuallyAllocInputs:1;
+  bool invertCond:1;
+  bool outputPredicted:1;
+  bool outputPredictionStatic:1;
+  bool ignoreInnerType:1;
+
   /*
    * skipSync indicates that a previous instruction that should have
    * adjusted the stack (eg FCall, Req*) didnt, because it could see
@@ -298,13 +303,15 @@ class NormalizedInstruction {
    * (ie at this point, rVmSp holds the "correct" value, rather
    *  than the value it had at the beginning of the tracelet)
    */
-  unsigned skipSync:1;
+  bool skipSync:1;
+
   /*
    * grouped indicates that the tracelet should not be broken
    * (eg by a side exit) between the preceding instruction and
    * this one
    */
-  unsigned grouped:1;
+  bool grouped:1;
+
   /*
    * guardedThis indicates that we know that ar->m_this is
    * a valid $this. eg:
@@ -313,28 +320,44 @@ class NormalizedInstruction {
    *   $this->bar = 2; # can skip the check
    *   return 5;       # can decRef ar->m_this unconditionally
    */
-  unsigned guardedThis:1;
+  bool guardedThis:1;
+
   /*
    * guardedCls indicates that we know the class exists
    */
-  unsigned guardedCls:1;
+  bool guardedCls:1;
+
   /*
    * dont check the surprise flag
    */
-  unsigned noSurprise:1;
+  bool noSurprise:1;
+
   /*
     noCtor is set on FPushCtorD to say that the ctor is
     going to be skipped (so dont setup an actrec)
   */
-  unsigned noCtor:1;
+  bool noCtor:1;
+
   /*
    * instruction is statically known to have no effect, e.g. unboxing a Cell
    */
-  unsigned noOp:1;
+  bool noOp:1;
+
   /*
    * This is an FPush* that will be directly bound to a Func*
    */
-  unsigned directCall:1;
+  bool directCall:1;
+
+  /*
+   * Indicates that a RetC/RetV should generate inlined return code
+   * rather than calling the shared stub.
+   */
+  bool inlineReturn:1;
+
+  // For returns, this tracks local ids that are statically known not
+  // to be reference counted at this point (i.e. won't require guards
+  // or decrefs).
+  boost::dynamic_bitset<> nonRefCountedLocals;
 
   ArgUnion constImm;
   TXFlags m_txFlags;
@@ -352,6 +375,7 @@ class NormalizedInstruction {
     inputs(),
     outStack(NULL),
     outLocal(NULL),
+    outLocal2(NULL),
     outStack2(NULL),
     outStack3(NULL),
     deadLocs(),
@@ -367,6 +391,7 @@ class NormalizedInstruction {
     noCtor(false),
     noOp(false),
     directCall(false),
+    inlineReturn(false),
     m_txFlags(Interp) {
     memset(imm, 0, sizeof(imm));
   }
@@ -396,13 +421,22 @@ class NormalizedInstruction {
     return i < 32 && ((checkedInputs >> i) & 1);
   }
 
+  bool wasGroupedWith(Op op) const {
+    return grouped && prev->op() == op;
+  }
+
+  template<class... OpTypes>
+  bool wasGroupedWith(Op op, OpTypes... ops) const {
+    return wasGroupedWith(op) || wasGroupedWith(ops...);
+  }
+
   enum OutputUse {
     OutputUsed,
     OutputUnused,
     OutputInferred,
     OutputDoesntCare
   };
-  OutputUse outputIsUsed(DynLocation* output) const;
+  OutputUse getOutputUsage(DynLocation* output, bool ignorePops = false) const;
 
   std::string toString() const;
 };
@@ -431,6 +465,28 @@ class UnknownInputExc : public std::exception {
   throw UnknownInputExc(__FILE__, __LINE__); \
 } while(0);
 
+class GuardType {
+ public:
+  GuardType(DataType outer = KindOfInvalid, DataType inner = KindOfInvalid);
+  GuardType(const RuntimeType& rtt);
+  GuardType(const GuardType& other);
+  const DataType   getOuterType() const;
+  const DataType   getInnerType() const;
+  bool             isSpecific() const;
+  bool             isRelaxed() const;
+  bool             isGeneric() const;
+  bool             isCounted() const;
+  bool             isMoreRefinedThan(const GuardType& other) const;
+  bool             mayBeUninit() const;
+  GuardType        getCountness() const;
+  GuardType        getCountnessInit() const;
+  DataTypeCategory getCategory() const;
+
+ private:
+  DataType outerType;
+  DataType innerType;
+};
+
 /*
  * A tracelet is a unit of input to the back-end. It is a partially typed,
  * non-maximal basic block, representing the next slice of the program to
@@ -442,6 +498,7 @@ class UnknownInputExc : public std::exception {
 typedef hphp_hash_map<Location, DynLocation*, Location> ChangeMap;
 typedef ChangeMap DepMap;
 typedef hphp_hash_set<Location, Location> LocationSet;
+typedef hphp_hash_map<DynLocation*, GuardType>  DynLocTypeMap;
 
 struct InstrStream {
   InstrStream() : first(NULL), last(NULL) {}
@@ -629,6 +686,7 @@ struct TraceletContext {
     , m_aliasTaint(false)
     , m_varEnvTaint(false)
   {}
+  RuntimeType currentType(const Location& l) const;
   DynLocation* recordRead(const InputInfo& l, bool useHHIR,
                           DataType staticType = KindOfInvalid);
   void recordWrite(DynLocation* dl, NormalizedInstruction* source);
@@ -642,9 +700,10 @@ struct TraceletContext {
 };
 
 enum TransKind {
-  TransNormal = 0,
-  TransAnchor = 1,
-  TransProlog = 2,
+  TransNormal   = 0,
+  TransNormalIR = 1,
+  TransAnchor   = 2,
+  TransProlog   = 3,
 };
 
 const char* getTransKindName(TransKind kind);
@@ -694,6 +753,7 @@ struct TransRec {
 
   TransRec(SrcKey                   s,
            MD5                      _md5,
+           TransKind                _kind,
            const Tracelet&          t,
            TCA                      _aStart = 0,
            uint32                   _aLen = 0,
@@ -702,7 +762,7 @@ struct TransRec {
            TCA                      _counterStart = 0,
            uint8                    _counterLen = 0,
            vector<TransBCMapping>   _bcMapping = vector<TransBCMapping>()) :
-      id(0), kind(TransNormal), src(s), md5(_md5),
+      id(0), kind(_kind), src(s), md5(_md5),
       bcStopOffset(t.m_nextSk.offset()), aStart(_aStart), aLen(_aLen),
       astubsStart(_astubsStart), astubsLen(_astubsLen),
       counterStart(_counterStart), counterLen(_counterLen),
@@ -725,9 +785,9 @@ class Translator {
   static const int MaxJmpsTracedThrough = 5;
 
 public:
-  // kFewLocals is a magic value used to decide whether or not to
-  // generate specialized code for RetC
-  static const int kFewLocals = 4;
+  // kMaxInlineReturnDecRefs is the maximum ref-counted locals to
+  // generate an inline return for.
+  static const int kMaxInlineReturnDecRefs = 1;
 
 private:
   friend struct TraceletContext;
@@ -735,6 +795,7 @@ private:
   int stackFrameOffset; // sp at current instr; used to normalize
 
   void analyzeSecondPass(Tracelet& t);
+  void preInputApplyMetaData(Unit::MetaHandle, NormalizedInstruction*);
   bool applyInputMetaData(Unit::MetaHandle&,
                           NormalizedInstruction* ni,
                           TraceletContext& tas,
@@ -742,11 +803,25 @@ private:
   void getInputs(Tracelet& t,
                  NormalizedInstruction* ni,
                  int& currentStackOffset,
-                 InputInfos& inputs);
+                 InputInfos& inputs,
+                 const TraceletContext& tas);
   void getOutputs(Tracelet& t,
                   NormalizedInstruction* ni,
                   int& currentStackOffset,
                   bool& varEnvTaint);
+  void relaxDeps(Tracelet& tclet, TraceletContext& tctxt);
+  void reanalizeConsumers(Tracelet& tclet, DynLocation* depDynLoc);
+  DataTypeCategory getOperandConstraintCategory(NormalizedInstruction* instr,
+                                                size_t opndIdx);
+  GuardType getOperandConstraintType(NormalizedInstruction* instr,
+                                     size_t                 opndIdx,
+                                     const GuardType&       specType);
+
+  void constrainOperandType(GuardType&             relxType,
+                            NormalizedInstruction* instr,
+                            size_t                 opndIdx,
+                            const GuardType&       specType);
+
 
   static RuntimeType liveType(Location l, const Unit &u);
   static RuntimeType liveType(const Cell* outer, const Location& l);
@@ -765,6 +840,7 @@ protected:
   void requestResetHighLevelTranslator();
 
   TCA m_resumeHelper;
+  TCA m_resumeHelperRet;
 
   typedef std::map<TCA, TransID> TransDB;
   TransDB            m_transDB;
@@ -773,6 +849,8 @@ protected:
 
   // For HHIR-based translation
   bool               m_useHHIR;
+
+  int64              m_createdTime;
 
   static Lease s_writeLease;
   static volatile bool s_replaceInFlight;
@@ -801,20 +879,15 @@ public:
   virtual TCA getRetFromInterpretedFrame() = 0;
   virtual void defineCns(StringData* name) = 0;
   virtual std::string getUsage() = 0;
+  virtual size_t getCodeSize() = 0;
+  virtual size_t getStubSize() = 0;
+  virtual size_t getTargetCacheSize() = 0;
   virtual bool dumpTC(bool ignoreLease = false) = 0;
   virtual bool dumpTCCode(const char *filename) = 0;
   virtual bool dumpTCData() = 0;
   virtual void protectCode() = 0;
   virtual void unprotectCode() = 0;
   virtual bool isValidCodeAddress(TCA) const = 0;
-
-  /*
-   * Resume is the main entry point for the translator from the
-   * bytecode interpreter (see enterVMWork).  It operates on behalf of
-   * a given nested invocation of the intepreter (calling back into it
-   * as necessary for blocks that need to be interpreted).
-   */
-  virtual void resume(SrcKey sk) = 0;
 
   enum FuncPrologueFlags {
     FuncPrologueNormal      = 0,
@@ -842,7 +915,7 @@ public:
   const TransRec* getTransRec(TransID transId) const {
     if (!isTransDBEnabled()) return NULL;
 
-    assert(transId < m_translations.size());
+    always_assert(transId < m_translations.size());
     return &m_translations[transId];
   }
 
@@ -861,6 +934,14 @@ public:
   void setTransCounter(TransID transId, uint64 value);
 
   uint32 addTranslation(const TransRec& transRec) {
+    if (Trace::moduleEnabledRelease(Trace::trans, 1)) {
+      // Log the translation's size, creation time, SrcKey, and size
+      Trace::traceRelease("New translation: %lld %s %u %u %d\n",
+                          Timer::GetCurrentTimeMicros() - m_createdTime,
+                          transRec.src.pretty().c_str(), transRec.aLen,
+                          transRec.astubsLen, transRec.kind);
+    }
+
     if (!isTransDBEnabled()) return -1u;
     uint32 id = getCurrentTransID();
     m_translations.push_back(transRec);
@@ -923,6 +1004,9 @@ public:
   TCA getResumeHelper() {
     return m_resumeHelper;
   }
+  TCA getResumeHelperRet() {
+    return m_resumeHelperRet;
+  }
 };
 
 int getStackDelta(const NormalizedInstruction& ni);
@@ -940,6 +1024,7 @@ opcodeControlFlowInfo(const Opcode instr) {
     case OpJmpZ:
     case OpJmpNZ:
     case OpSwitch:
+    case OpSSwitch:
     case OpContExit:
     case OpRetC:
     case OpRetV:
@@ -947,8 +1032,13 @@ opcodeControlFlowInfo(const Opcode instr) {
     case OpExit:
     case OpFatal:
     case OpIterNext:
+    case OpIterNextK:
+    case OpIterNextM:
+    case OpIterNextMK:
     case OpIterInit: // May branch to fail case.
-    case OpIterInitM: // May branch to fail case.
+    case OpIterInitK: // Ditto
+    case OpIterInitM: // Ditto
+    case OpIterInitMK: // Ditto
     case OpThrow:
     case OpUnwind:
     case OpEval:
@@ -999,8 +1089,6 @@ bool outputDependsOnInput(const Opcode instr);
 extern bool tc_dump();
 const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
                                   bool& magicCall, bool staticLookup);
-
-bool freeLocalsInline();
 
 } } } // HPHP::VM::Transl
 

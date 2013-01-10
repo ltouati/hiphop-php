@@ -88,7 +88,7 @@ static const VM::Class* get_cls(CVarRef class_or_object) {
     ObjectData* obj = class_or_object.toCObjRef().get();
     cls = obj->getVMClass();
   } else {
-    cls = VM::Unit::lookupClass(class_or_object.toString().get());
+    cls = VM::Unit::loadClass(class_or_object.toString().get());
   }
   return cls;
 }
@@ -479,7 +479,12 @@ Array f_hphp_get_method_info(CVarRef cls, CVarRef name) {
     }
 
     const ClassInfo *cls = ClassInfo::FindClassInterfaceOrTrait(className);
-    if (!cls) return Array();
+    if (cls == NULL) {
+      if (!AutoloadHandler::s_instance->invokeHandler(className) ||
+          !(cls = ClassInfo::FindClassInterfaceOrTrait(className))) {
+        return Array();
+      }
+    }
     return get_method_info(cls, name);
   }
 }
@@ -858,7 +863,7 @@ Array f_hphp_get_class_info(CVarRef name) {
 Array f_hphp_get_function_info(CStrRef name) {
   Array ret;
   if (hhvm) {
-    const VM::Func* func = VM::Unit::lookupFunc(name.get());
+    const VM::Func* func = VM::Unit::loadFunc(name.get());
     if (!func) return ret;
     ret.set(s_name,       VarNR(func->name()));
     ret.set(s_closure,    empty_string);
@@ -872,7 +877,10 @@ Array f_hphp_get_function_info(CStrRef name) {
 
   const ClassInfo::MethodInfo *info = ClassInfo::FindFunction(name.data());
   if (info == NULL) {
-    return ret;
+    if (!AutoloadHandler::s_instance->autoloadFunc(name) ||
+        !(info = ClassInfo::FindFunction(name.data()))) {
+      return ret;
+    }
   }
 
   ret.set(s_name,       info->name);

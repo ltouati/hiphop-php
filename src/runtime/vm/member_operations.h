@@ -19,7 +19,6 @@
 
 #include "runtime/base/types.h"
 #include "runtime/base/strings.h"
-#include "runtime/base/tv_macros.h"
 #include "system/lib/systemlib.h"
 #include "runtime/base/builtin_functions.h"
 #include "runtime/vm/core_types.h"
@@ -133,7 +132,7 @@ static inline StringData* prepareKey(TypedValue* tv) {
 template <KeyType keyType>
 static inline void releaseKey(StringData* keySD) {
   if (keyType == AnyKey) {
-    LITSTR_DECREF(keySD);
+    decRefStr(keySD);
   } else {
     ASSERT(keyType == StrKey);
   }
@@ -565,9 +564,7 @@ static inline void SetElemArray(TypedValue* base, TypedValue* key,
 
   if (newData != NULL && newData != a) {
     newData->incRefCount();
-    if (a->decRefCount() == 0) {
-      a->release();
-    }
+    decRefArr(a);
     base->m_data.parr = newData;
   }
 }
@@ -656,7 +653,7 @@ static inline void SetElem(TypedValue* base, TypedValue* key, Cell* value) {
         s[x] = y[0];
         sd->setSize(slen);
         sd->incRefCount();
-        if (base->m_data.pstr->decRefCount() == 0) base->m_data.pstr->release();
+        decRefStr(base->m_data.pstr);
         base->m_data.pstr = sd;
         base->m_type = KindOfString;
       }
@@ -1206,7 +1203,7 @@ static inline void UnsetElem(TypedValue* base, TypedValue* member) {
 
 template <bool warn>
 static inline DataType propPreNull(TypedValue& tvScratch, TypedValue*& result) {
-  TV_WRITE_NULL(&tvScratch);
+  tvWriteNull(&tvScratch);
   result = &tvScratch;
   if (warn) {
     raise_warning("Cannot access property on non-object");
@@ -1438,9 +1435,7 @@ static inline void SetPropStdclass(TypedValue* base, TypedValue* key,
   obj->incRefCount();
   StringData* keySD = prepareKey(key);
   obj->setProp(NULL, keySD, (TypedValue*)val);
-  if (keySD->decRefCount() == 0) {
-    keySD->release();
-  }
+  decRefStr(keySD);
   tvRefcountedDecRef(base);
   base->m_type = KindOfObject;
   /* dont set _count; base could be an inner variant */
@@ -1526,7 +1521,7 @@ static inline TypedValue* SetOpPropStdclass(TypedValue& tvRef, unsigned char op,
   tvWriteNull(&tvRef);
   SETOP_BODY(&tvRef, op, rhs);
   obj->setProp(NULL, keySD, &tvRef);
-  LITSTR_DECREF(keySD);
+  decRefStr(keySD);
   return &tvRef;
 }
 
@@ -1627,7 +1622,7 @@ static inline void IncDecPropStdclass(unsigned char op, TypedValue* base,
     ASSERT(!IS_REFCOUNTED_TYPE(tDest.m_type));
   }
   ASSERT(!IS_REFCOUNTED_TYPE(tv.m_type));
-  LITSTR_DECREF(keySD);
+  decRefStr(keySD);
 }
 
 template <bool setResult, KeyType keyType>

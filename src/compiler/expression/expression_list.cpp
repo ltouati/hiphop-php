@@ -34,7 +34,7 @@ ExpressionList::ExpressionList(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                                ListKind kind)
   : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ExpressionList)),
     m_outputCount(-1),
-    m_arrayElements(false), m_kind(kind) {
+    m_arrayElements(false), m_collectionType(0), m_kind(kind) {
 }
 
 ExpressionPtr ExpressionList::clone() {
@@ -138,7 +138,7 @@ bool ExpressionList::containsDynamicConstant(AnalysisResultPtr ar) const {
 }
 
 bool ExpressionList::isScalarArrayPairs() const {
-  if (!m_arrayElements) return false;
+  if (!m_arrayElements || m_collectionType) return false;
   for (unsigned int i = 0; i < m_exps.size(); i++) {
     ArrayPairExpressionPtr exp =
       dynamic_pointer_cast<ArrayPairExpression>(m_exps[i]);
@@ -286,6 +286,11 @@ void ExpressionList::markParams(bool noRefWrapper) {
   }
 }
 
+void ExpressionList::setCollectionType(int cType) {
+  m_arrayElements = true;
+  m_collectionType = cType;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // static analysis functions
 
@@ -414,7 +419,7 @@ void ExpressionList::optimize(AnalysisResultConstPtr ar) {
         if (isGlobal < 0) {
           isGlobal = global;
         } else {
-          assert(isGlobal == global);
+          always_assert(isGlobal == global);
         }
         if (isGlobal && e->isScalar()) {
           removeElement(i);
@@ -469,7 +474,8 @@ bool ExpressionList::canonCompare(ExpressionPtr e) const {
     static_pointer_cast<ExpressionList>(e);
 
   return m_arrayElements == l->m_arrayElements &&
-    m_kind == l->m_kind;
+         m_collectionType == l->m_collectionType &&
+         m_kind == l->m_kind;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -627,7 +633,7 @@ bool ExpressionList::preOutputCPP(CodeGenerator &cg, AnalysisResultPtr ar,
 }
 
 unsigned int ExpressionList::checkLitstrKeys() const {
-  ASSERT(m_arrayElements);
+  ASSERT(m_arrayElements && !m_collectionType);
   std::set<string> keys;
   for (unsigned int i = 0; i < m_exps.size(); i++) {
     ArrayPairExpressionPtr ap =
@@ -666,13 +672,13 @@ bool ExpressionList::hasNonArrayCreateValue(
 void ExpressionList::outputCPPUniqLitKeyArrayInit(
   CodeGenerator &cg, AnalysisResultPtr ar, bool litstrKeys, int64 num,
   bool arrayElements /* = true */, unsigned int start /* = 0 */) {
-  if (arrayElements) ASSERT(m_arrayElements);
+  if (arrayElements) ASSERT(m_arrayElements && !m_collectionType);
   unsigned int n =  m_exps.size();
   cg_printf("array_createv%c(%lld, ", litstrKeys ? 's' : 'i', num);
-  assert(n - start == num);
+  always_assert(n - start == num);
   for (unsigned int i = start; i < n; i++) {
     ExpressionPtr exp = m_exps[i];
-    assert(exp);
+    always_assert(exp);
     ExpressionPtr name;
     ExpressionPtr value = exp;
     if (arrayElements) {
@@ -682,14 +688,14 @@ void ExpressionList::outputCPPUniqLitKeyArrayInit(
       value = ap->getValue();
     }
     if (name) {
-      assert(litstrKeys);
+      always_assert(litstrKeys);
       cg_printf("toSPOD(");
       name->outputCPP(cg, ar);
       cg_printf("), ");
     }
     cg_printf("toVPOD(");
     if (value->isScalar()) {
-      assert(!cg.hasScalarVariant());
+      always_assert(!cg.hasScalarVariant());
       cg.setScalarVariant();
       if (!Option::UseScalarVariant) cg_printf("VarNR(");
       value->outputCPP(cg, ar);
@@ -752,31 +758,43 @@ bool ExpressionList::outputCPPInternal(CodeGenerator &cg,
   bool needsComma = false;
   bool anyOutput = false;
   if (m_arrayElements) {
-    bool isVector = true;
-    for (unsigned int i = 0; i < m_exps.size(); i++) {
-      ArrayPairExpressionPtr ap =
-        dynamic_pointer_cast<ArrayPairExpression>(m_exps[i]);
-      if (ap->getName()) {
-        isVector = false;
-        break;
+    if (!m_collectionType) {
+      bool isVector = true;
+      for (unsigned int i = 0; i < m_exps.size(); i++) {
+        ArrayPairExpressionPtr ap =
+          dynamic_pointer_cast<ArrayPairExpression>(m_exps[i]);
+        if (ap->getName()) {
+          isVector = false;
+          break;
+        }
       }
+      if (outputCPPArrayCreate(cg, ar, isVector, pre)) return true;
+      cg_printf("ArrayInit");
+      if (pre) {
+        cg_printf(" %s", m_cppTemp.c_str());
+      }
+      cg_printf("(%d)", (int)m_exps.size());
+      if (pre) cg_printf(";\n");
+      needsComma = true;
+      anyOutput = true;
+    } else {
+      cg_printf("CollectionInit");
+      if (pre) {
+        cg_printf(" %s", m_cppTemp.c_str());
+      }
+      cg_printf("(%d, %luLL)", m_collectionType, m_exps.size());
+      if (pre) cg_printf(";\n");
+      needsComma = true;
+      anyOutput = true;
     }
-    if (outputCPPArrayCreate(cg, ar, isVector, pre)) return true;
-    cg_printf("ArrayInit");
-    if (pre) {
-      cg_printf(" %s", m_cppTemp.c_str());
-    }
-    cg_printf("(%d)", (int)m_exps.size());
-    if (pre) cg_printf(";\n");
-    needsComma = true;
-    anyOutput = true;
   }
 
   bool trailingComma = false;
   unsigned i = 0, s = m_exps.size();
   unsigned ix = m_kind == ListKindLeft ? 0 : s - 1;
   bool uniqueStringKeys =
-    m_arrayElements && (checkLitstrKeys() == s); // TODO integer keys as well
+    m_arrayElements && !m_collectionType &&
+    (checkLitstrKeys() == s); // TODO integer keys as well
   for ( ; i < s; i++) {
     if (ExpressionPtr exp = m_exps[i]) {
       if (pre) {

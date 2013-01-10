@@ -41,11 +41,19 @@ TRACE_SET_MOD(typeProfile);
  * (fidelity relative to ourselves).
  */
 
+typedef uint16_t Counter;
+static const Counter kMaxCounter = USHRT_MAX;
+
 struct ValueProfile {
   uint32_t m_tag;
   // All of these saturate at 255.
-  uint8_t  m_totalSamples;
-  uint8_t  m_samples[MaxNumDataTypes];
+  Counter m_totalSamples;
+  Counter m_samples[MaxNumDataTypesIndex];
+  void dump() {
+    for (int i = 0; i < MaxNumDataTypesIndex; i++) {
+      TRACE(0, "t%3d: %4d\n", i, m_samples[getDataTypeValue(i)]);
+    }
+  }
 };
 
 /*
@@ -153,7 +161,8 @@ static int64 numRequests;
 
 static inline bool warmedUp() {
   return (numRequests >= RuntimeOption::EvalJitWarmupRequests) ||
-    (RuntimeOption::clientExecutionMode() && !RuntimeOption::EvalJitProfileRecord);
+    (RuntimeOption::clientExecutionMode() &&
+     !RuntimeOption::EvalJitProfileRecord);
 }
 
 static inline bool profileThisRequest() {
@@ -225,18 +234,21 @@ keyToVP(const TypeProfileKey& key, KeyToVPMode mode) {
 void recordType(const TypeProfileKey& key, DataType dt) {
   if (!profiles) return;
   if (!shouldProfile()) return;
+  ASSERT(dt != KindOfUninit);
   // Normalize strings to KindOfString.
   if (dt == KindOfStaticString) dt = KindOfString;
   TRACE(1, "recordType lookup: %s -> %d\n", key.m_name->data(), dt);
   ValueProfile *prof = keyToVP(key, Write);
-  if (prof->m_totalSamples != UCHAR_MAX) {
+  if (prof->m_totalSamples != kMaxCounter) {
     prof->m_totalSamples++;
-    // NB: we can't quite assert that we have fewer than UCHAR_MAX samples,
+    // NB: we can't quite assert that we have fewer than kMaxCounter samples,
     // because other threads are updating this structure without locks.
-    if (prof->m_samples[dt] < UCHAR_MAX) {
-      prof->m_samples[dt]++;
+    int dtIndex = getDataTypeIndex(dt);
+    if (prof->m_samples[dtIndex] < kMaxCounter) {
+      prof->m_samples[dtIndex]++;
     }
   }
+  ONTRACE(2, prof->dump());
 }
 
 std::pair<DataType, double> predictType(const TypeProfileKey& key) {
@@ -260,15 +272,15 @@ std::pair<DataType, double> predictType(const TypeProfileKey& key) {
   DataType pred = KindOfUninit;
   // If we have fewer than kMinInstances predictions, consider it too
   // little data to be actionable.
-  for (int i = 0; i < MaxNumDataTypes; ++i) {
+  for (int i = 0; i < MaxNumDataTypesIndex; ++i) {
     double prob = (1.0 * prof->m_samples[i]) / total;
     if (prob > maxProb) {
       maxProb = prob;
-      pred = (DataType)i;
+      pred = getDataTypeValue(i);
     }
     if (prob >= 1.0) break;
   }
-  Stats::inc(Stats::TypePred_Hit, maxProb == 1.0);
+  Stats::inc(Stats::TypePred_Hit, maxProb >= 1.0);
   Stats::inc(Stats::TypePred_MissTooWeak, maxProb < 1.0);
   TRACE(2, "TypePred: hit %s numSamples %d pred %d prob %g\n",
         key.m_name->data(), prof->m_totalSamples, pred, maxProb);
